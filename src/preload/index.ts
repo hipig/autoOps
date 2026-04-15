@@ -42,6 +42,8 @@ export interface ElectronAPI {
     setDefault: (id: string) => Promise<{ success: boolean }>
     getDefault: () => Promise<unknown | null>
     getById: (id: string) => Promise<unknown | null>
+    getByPlatform: (platform: string) => Promise<unknown[]>
+    getActiveAccounts: () => Promise<unknown[]>
   }
   login: {
     douyin: () => Promise<{ success: boolean; storageState?: string; error?: string; userInfo?: { nickname: string; avatar?: string; uniqueId?: string } }>
@@ -135,7 +137,9 @@ const api: ElectronAPI = {
     delete: (id) => ipcRenderer.invoke('account:delete', id),
     setDefault: (id) => ipcRenderer.invoke('account:setDefault', id),
     getDefault: () => ipcRenderer.invoke('account:getDefault'),
-    getById: (id) => ipcRenderer.invoke('account:getById', id)
+    getById: (id) => ipcRenderer.invoke('account:getById', id),
+    getByPlatform: (platform) => ipcRenderer.invoke('account:getByPlatform', platform),
+    getActiveAccounts: () => ipcRenderer.invoke('account:getActiveAccounts')
   },
   login: {
     douyin: () => ipcRenderer.invoke('login:douyin')

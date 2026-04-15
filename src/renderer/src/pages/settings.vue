@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, toRaw } from 'vue'
 import { useRouter } from 'vue-router'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -37,8 +37,14 @@ onMounted(async () => {
 })
 
 async function saveAISettings() {
-  await settingsStore.updateAISettings(aiSettings.value)
-  toast.success('设置已保存')
+  try {
+    const rawData = JSON.parse(JSON.stringify(toRaw(aiSettings.value)))
+    await settingsStore.updateAISettings(rawData)
+    toast.success('设置已保存')
+  } catch (error) {
+    console.error('[Settings] Save failed:', error)
+    toast.error('保存失败: ' + String(error))
+  }
 }
 
 async function testAI() {

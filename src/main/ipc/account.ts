@@ -1,14 +1,20 @@
 import { ipcMain } from 'electron'
 import { store, StorageKey } from '../utils/storage'
+import type { Platform } from '../../shared/platform'
+import type { Account } from '../../shared/account'
 
 export interface Account {
   id: string
   name: string
-  platform: 'douyin'
+  platform: Platform
+  platformAccountId?: string
   avatar?: string
   storageState: unknown
+  cookies?: Record<string, string>
   createdAt: number
   isDefault: boolean
+  status: 'active' | 'inactive' | 'expired'
+  expiresAt?: number
 }
 
 function getAccounts(): Account[] {
@@ -34,7 +40,8 @@ export function registerAccountIPC(): void {
       ...account,
       id: generateId(),
       createdAt: Date.now(),
-      isDefault: accounts.length === 0
+      isDefault: accounts.length === 0,
+      status: account.status || 'active'
     }
     accounts.push(newAccount)
     setAccounts(accounts)
@@ -79,5 +86,15 @@ export function registerAccountIPC(): void {
   ipcMain.handle('account:getById', async (_, id: string): Promise<Account | null> => {
     const accounts = getAccounts()
     return accounts.find(a => a.id === id) || null
+  })
+
+  ipcMain.handle('account:getByPlatform', async (_, platform: Platform): Promise<Account[]> => {
+    const accounts = getAccounts()
+    return accounts.filter(a => a.platform === platform)
+  })
+
+  ipcMain.handle('account:getActiveAccounts', async (): Promise<Account[]> => {
+    const accounts = getAccounts()
+    return accounts.filter(a => a.status === 'active')
   })
 }

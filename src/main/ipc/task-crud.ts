@@ -2,6 +2,7 @@ import { ipcMain } from 'electron'
 import { store, StorageKey } from '../utils/storage'
 import type { Task, TaskTemplate } from '../../shared/task'
 import { generateTaskId, generateTemplateId } from '../../shared/task'
+import type { Platform, TaskType } from '../../shared/platform'
 
 export function registerTaskIPC(): void {
   ipcMain.handle('task:getAll', async () => {
@@ -19,12 +20,19 @@ export function registerTaskIPC(): void {
     return tasks.filter((t) => t.accountId === accountId)
   })
 
-  ipcMain.handle('task:create', async (_event, data: { name: string; accountId: string; config?: Task['config'] }) => {
+  ipcMain.handle('task:getByPlatform', async (_event, platform: Platform) => {
+    const tasks = store.get(StorageKey.TASKS) as Task[] || []
+    return tasks.filter((t) => t.platform === platform)
+  })
+
+  ipcMain.handle('task:create', async (_event, data: { name: string; accountId: string; platform?: Platform; taskType?: TaskType; config?: Task['config'] }) => {
     const tasks = store.get(StorageKey.TASKS) as Task[] || []
     const newTask: Task = {
       id: generateTaskId(),
       name: data.name,
       accountId: data.accountId,
+      platform: data.platform || 'douyin',
+      taskType: data.taskType || 'comment',
       config: data.config || {
         version: 'v2',
         ruleGroups: [],
@@ -84,11 +92,13 @@ export function registerTaskIPC(): void {
     return templates || []
   })
 
-  ipcMain.handle('task-template:save', async (_event, name: string, config: Task['config']) => {
+  ipcMain.handle('task-template:save', async (_event, name: string, config: Task['config'], platform?: Platform, taskType?: TaskType) => {
     const templates = store.get(StorageKey.TASK_TEMPLATES) as TaskTemplate[] || []
     const template: TaskTemplate = {
       id: generateTemplateId(),
       name,
+      platform: platform || 'douyin',
+      taskType: taskType || 'comment',
       config,
       createdAt: Date.now()
     }

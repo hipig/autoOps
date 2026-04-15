@@ -65,6 +65,7 @@ const handleLogin = async () => {
 
   try {
     const result = await window.api.login.douyin()
+    console.log('Login result:', result)
 
     if (!result.success) {
       toast.error(result.error || '登录失败')
@@ -78,12 +79,16 @@ const handleLogin = async () => {
       storageState: result.storageState,
       isDefault: accountStore.accounts.length === 0
     }
+    console.log('Account data to save:', accountData)
 
-    await accountStore.addAccount(accountData)
+    const savedAccount = await accountStore.addAccount(accountData)
+    console.log('Saved account:', savedAccount)
     toast.success(`账号 "${accountData.name}" 添加成功！`)
+    await accountStore.loadAccounts()
+    console.log('Accounts after reload:', accountStore.accounts)
   } catch (error) {
     console.error('Login error:', error)
-    toast.error('登录过程发生错误')
+    toast.error('登录过程发生错误: ' + (error as Error).message)
   } finally {
     isLoggingIn.value = false
   }

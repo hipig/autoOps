@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { ref, toRaw } from 'vue'
 import type { FeedAcSettingsV2 } from '../../../shared/feed-ac-setting'
 import type { AISettings } from '../../../shared/ai-setting'
 import { getDefaultFeedAcSettings } from '../../../shared/feed-ac-setting'
@@ -14,7 +14,7 @@ export const useSettingsStore = defineStore('settings', () => {
   }
 
   async function updateFeedAcSettings(settings: FeedAcSettingsV2) {
-    feedAcSettings.value = await window.api['feed-ac-settings'].update(settings) as FeedAcSettingsV2
+    feedAcSettings.value = await window.api['feed-ac-settings'].update(toRaw(settings)) as FeedAcSettingsV2
   }
 
   async function resetFeedAcSettings() {
@@ -26,7 +26,7 @@ export const useSettingsStore = defineStore('settings', () => {
   }
 
   async function updateAISettings(settings: AISettings) {
-    aiSettings.value = await window.api['ai-settings'].update(settings) as AISettings
+    aiSettings.value = await window.api['ai-settings'].update(toRaw(settings)) as AISettings
   }
 
   async function resetAISettings() {

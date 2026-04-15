@@ -23,72 +23,117 @@ export function registerLoginIPC(): void {
     }
 
     try {
-      const { chromium } = await import('playwright')
-      
+      const { chromium } = await import('@playwright/test')
+
       const tempUserDataDir = join(process.env.APPDATA || process.env.HOME || '', 'AutoOps', 'browser-data', 'login-temp')
 
-      const browser = await chromium.launch({
+      const context = await chromium.launchPersistentContext(tempUserDataDir, {
         executablePath: browserPath,
         headless: false,
+        viewport: { width: 1280, height: 800 },
+        screen: { width: 1280, height: 800 },
         args: [
-          `--user-data-dir=${tempUserDataDir}`,
           '--disable-web-security',
           '--disable-features=IsolateOrigins,site-per-process'
         ]
       })
 
-      const context = await browser.newContext({
-        viewport: { width: 400, height: 720 },
-        screen: { width: 400, height: 720 }
-      })
+      const page = context.pages()[0] || await context.newPage()
 
-      const page = await context.newPage()
+      await page.goto('https://www.douyin.com/', { waitUntil: 'load', timeout: 60000 })
+      await page.waitForTimeout(3000)
 
-      await page.goto('https://www.douyin.com/', { waitUntil: 'networkidle', timeout: 30000 })
+      console.log('Waiting for user to login...')
 
-      await page.waitForURL(/\#\/follow|\/user/, { timeout: 120000 }).catch(() => {
-        console.log('Waiting for user to login...')
-      })
-
-      const currentUrl = page.url()
-      console.log('Current URL after login attempt:', currentUrl)
+      try {
+        await page.waitForURL(/\#\/follow|\/user\/|user\/profile/, { timeout: 120000 })
+        console.log('Login detected, current URL:', page.url())
+      } catch (e) {
+        console.log('URL wait timeout, checking current state...')
+      }
 
       let userInfo: LoginResult['userInfo'] = undefined
 
       try {
-        await page.waitForSelector('[class*="avatar"]', { timeout: 10000 }).catch(() => null)
-        
+        const pageContent = await page.content()
+        console.log('Page loaded, content length:', pageContent.length)
+
         const nickname = await page.evaluate(() => {
-          const elements = document.querySelectorAll('[class*="nickname"], [class*="name"]')
-          for (const el of elements) {
-            const text = el.textContent?.trim()
-            if (text && text.length > 0 && text.length < 50) {
-              return text
-            }
+          const selectors = [
+            '[data-e2e="profile-nickname"]',
+            '[class*="nickname"]',
+            '[class*="user-name"]',
+            '.author-name',
+            '.profile-name',
+            'a[href*="/user/"]',
+            '[class*="header"] [class*="name"]'
+          ]
+          for (const selector of selectors) {
+            try {
+              const el = document.querySelector(selector)
+              if (el) {
+                const text = el.textContent?.trim()
+                if (text && text.length > 0 && text.length < 50 && !text.includes('登录') && !text.includes('register')) {
+                  return text
+                }
+              }
+            } catch {}
+          }
+          const url = window.location.href
+          if (url.includes('/user/')) {
+            const match = url.match(/\/user\/([^/?#]+)/)
+            if (match) return match[1]
           }
           return null
         })
 
         const avatar = await page.evaluate(() => {
-          const img = document.querySelector('[class*="avatar"] img, [class*="user-avatar"] img, img[class*="avatar"]')
-          return img?.getAttribute('src') || undefined
+          const selectors = [
+            '[data-e2e="profile-avatar"] img',
+            '[class*="avatar"] img',
+            '[class*="user-avatar"] img',
+            'img[class*="avatar"]'
+          ]
+          for (const selector of selectors) {
+            try {
+              const img = document.querySelector(selector)
+              if (img && img.getAttribute('src')) {
+                return img.getAttribute('src')
+              }
+            } catch {}
+          }
+          return undefined
         })
 
         const uniqueId = await page.evaluate(() => {
           const url = window.location.href
-          const match = url.match(/\/user\/([^/?#]+)/)
-          return match ? match[1] : undefined
+          const patterns = [
+            /\/user\/([^/?#]+)/,
+            /\/user\/profile\/([^/?#]+)/,
+            /\#\/follow\/([^/?#]+)/
+          ]
+          for (const pattern of patterns) {
+            const match = url.match(pattern)
+            if (match) return match[1]
+          }
+          return undefined
         })
+
+        console.log('Extracted user info:', { nickname, avatar, uniqueId })
 
         if (nickname) {
           userInfo = { nickname, avatar, uniqueId }
-          console.log('Extracted user info:', userInfo)
+        } else {
+          console.log('No nickname found, using default')
+          userInfo = { nickname: '抖音用户', avatar, uniqueId }
         }
       } catch (e) {
         console.log('Failed to extract user info:', e)
+        userInfo = { nickname: '抖音用户' }
       }
 
       const cookies = await context.cookies()
+      console.log('Cookies count:', cookies.length)
       const storageState = {
         cookies: cookies.map((c: { name: string; value: string; domain: string; path: string; expires: number; httpOnly: boolean; secure: boolean; sameSite: string }) => ({
           name: c.name,
@@ -102,13 +147,15 @@ export function registerLoginIPC(): void {
         })),
         origins: []
       }
+      console.log('StorageState prepared, cookies:', storageState.cookies.length)
 
-      await browser.close()
+      await context.close()
 
+      console.log('Returning result:', { success: true, userInfo })
       return {
         success: true,
         storageState: JSON.stringify(storageState),
-        userInfo: userInfo || { nickname: '抖音用户' }
+        userInfo
       }
     } catch (error) {
       console.error('Douyin login error:', error)
