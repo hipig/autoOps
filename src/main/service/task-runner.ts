@@ -18,6 +18,7 @@ export interface TaskRunConfig {
   taskType: TaskType
   settings: FeedAcSettingsV3
   accountId?: string
+  crudTaskId?: string // CRUD 任务的 ID，用于 UI 关联
 }
 
 export type TaskRunnerStatus = 'running' | 'paused' | 'stopped' | 'completed' | 'failed'
@@ -36,6 +37,7 @@ export class TaskRunner extends EventEmitter {
   private platform: Platform = 'douyin'
   private _status: TaskRunnerStatus = 'running'
   private externalContext = false // 是否使用外部传入的context
+  private _crudTaskId = '' // CRUD 任务 ID
 
   get status(): TaskRunnerStatus {
     return this._status
@@ -49,6 +51,10 @@ export class TaskRunner extends EventEmitter {
     return this._stopped
   }
 
+  get crudTaskId(): string {
+    return this._crudTaskId
+  }
+
   /**
    * 启动任务 - 自行创建浏览器实例（兼容旧调用方式）
    */
@@ -58,6 +64,7 @@ export class TaskRunner extends EventEmitter {
     this._stopped = false
     this._paused = false
     this._status = 'running'
+    this._crudTaskId = config.crudTaskId || ''
 
     log.info(`TaskRunner ${this.taskId} starting...`)
     this.emit('progress', { message: `任务启动 (${PLATFORMS[config.platform].name})`, timestamp: Date.now() })
@@ -92,6 +99,9 @@ export class TaskRunner extends EventEmitter {
     this.adapter.setVideoCache(this.videoCache)
 
     await this.page.goto(PLATFORMS[config.platform].homeUrl)
+    // 等待页面加载并让 feed API 数据先到达缓存
+    await sleep(2000)
+    log.info(`[TaskRunner ${this.taskId}] Page loaded, video cache size: ${this.videoCache.size}`)
 
     const aiSettings = store.get(StorageKey.AI_SETTINGS) as AISettings | null
     if (aiSettings && config.settings.aiCommentEnabled) {
@@ -121,6 +131,7 @@ export class TaskRunner extends EventEmitter {
     this._stopped = false
     this._paused = false
     this._status = 'running'
+    this._crudTaskId = config.crudTaskId || ''
 
     log.info(`TaskRunner ${this.taskId} starting with shared browser...`)
     this.emit('progress', { message: `任务启动 (${PLATFORMS[config.platform].name})`, timestamp: Date.now() })
@@ -135,6 +146,9 @@ export class TaskRunner extends EventEmitter {
     this.adapter.setVideoCache(this.videoCache)
 
     await this.page.goto(PLATFORMS[config.platform].homeUrl)
+    // 等待页面加载并让 feed API 数据先到达缓存
+    await sleep(2000)
+    log.info(`[TaskRunner ${this.taskId}] Page loaded, video cache size: ${this.videoCache.size}`)
 
     const aiSettings = store.get(StorageKey.AI_SETTINGS) as AISettings | null
     if (aiSettings && config.settings.aiCommentEnabled) {
@@ -161,19 +175,26 @@ export class TaskRunner extends EventEmitter {
     if (!this.page) return
 
     const feedEndpoint = PLATFORM_CONFIGS[this.platform]?.apiEndpoints?.feed
+    const feedPathSegment = '/aweme/v1/web/' // 抖音 feed API 路径段
 
     this.page.on('response', async (response: Response) => {
       const url = response.url()
-      const isFeed = feedEndpoint ? url.includes(feedEndpoint) : url.includes('/aweme/v1/web/tab/feed/')
+      // 优先匹配配置的完整 URL，其次匹配路径段
+      const isFeed = feedEndpoint
+        ? url.includes(feedEndpoint) || url.includes(feedPathSegment)
+        : url.includes('/aweme/v1/web/tab/feed/') || url.includes(feedPathSegment)
       if (isFeed) {
         try {
           const body = await response.json() as { aweme_list: any[] }
           if (body?.aweme_list) {
+            const count = body.aweme_list.length
             body.aweme_list.forEach((video) => {
               this.videoCache.set(video.aweme_id, video)
             })
+            log.info(`[TaskRunner ${this.taskId}] Feed API: cached ${count} videos, total cache: ${this.videoCache.size}`)
           }
-        } catch {
+        } catch (e) {
+          log.warn(`[TaskRunner ${this.taskId}] Feed API: failed to parse response`)
         }
       }
     })
@@ -376,20 +397,34 @@ export class TaskRunner extends EventEmitter {
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       const videoId = await this.adapter.getActiveVideoId()
       if (!videoId) {
+        log.info(`[TaskRunner ${this.taskId}] getCurrentVideoInfo attempt ${attempt + 1}/${maxRetries}: videoId not found`)
         if (attempt < maxRetries - 1) {
-          await sleep(500)
+          await sleep(1000)
           continue
         }
+        // videoId 获取失败，尝试 DOM 降级
+        const domInfo = await this.getVideoInfoFromDOM()
+        if (domInfo) return domInfo
         return null
       }
 
       const videoData = this.videoCache.get(videoId)
       if (!videoData) {
+        log.info(`[TaskRunner ${this.taskId}] getCurrentVideoInfo attempt ${attempt + 1}/${maxRetries}: videoId=${videoId}, not in cache (cache size: ${this.videoCache.size})`)
         if (attempt < maxRetries - 1) {
-          await sleep(500)
+          await sleep(1000)
           continue
         }
-        return this.adapter.getVideoInfo(videoId)
+        // cache 未命中，尝试 adapter 的 getVideoInfo
+        const adapterInfo = await this.adapter.getVideoInfo(videoId)
+        if (adapterInfo) return adapterInfo
+        // 最终降级：从 DOM 提取
+        const domInfo = await this.getVideoInfoFromDOM()
+        if (domInfo) {
+          domInfo.videoId = videoId
+          return domInfo
+        }
+        return null
       }
 
       this.videoCache.delete(videoId)
@@ -415,6 +450,61 @@ export class TaskRunner extends EventEmitter {
     }
 
     return null
+  }
+
+  /**
+   * DOM 降级提取视频信息 — 当 API cache 未命中时从页面 DOM 提取基础信息
+   */
+  private async getVideoInfoFromDOM(): Promise<VideoInfo | null> {
+    if (!this.page) return null
+    try {
+      const info = await this.page.evaluate(() => {
+        const activeVideo = document.querySelector('[data-e2e="feed-active-video"]')
+        if (!activeVideo) return null
+
+        // 提取作者昵称
+        const nicknameEl = activeVideo.querySelector('[data-e2e="video-nickname"]') ||
+          activeVideo.querySelector('.account-name') ||
+          activeVideo.querySelector('.author-card-user-name')
+        const nickname = nicknameEl?.textContent?.trim() || ''
+
+        // 提取视频描述
+        const descEl = activeVideo.querySelector('[data-e2e="video-desc"]') ||
+          activeVideo.querySelector('.video-desc') ||
+          activeVideo.querySelector('.desc')
+        const description = descEl?.textContent?.trim() || ''
+
+        // 提取 videoId
+        const vid = activeVideo.getAttribute('data-e2e-vid') || ''
+
+        if (!vid && !nickname && !description) return null
+
+        return {
+          videoId: vid || `dom-${Date.now()}`,
+          title: description,
+          description,
+          author: {
+            userId: '',
+            nickname,
+            verified: false
+          },
+          tags: [] as string[],
+          likeCount: 0,
+          collectCount: 0,
+          shareCount: 0,
+          commentCount: 0,
+          shareUrl: '',
+          createTime: Date.now()
+        }
+      })
+      if (info) {
+        log.info(`[TaskRunner ${this.taskId}] DOM fallback: extracted info for @${info.author.nickname}`)
+      }
+      return info as VideoInfo | null
+    } catch (e) {
+      log.warn(`[TaskRunner ${this.taskId}] DOM fallback failed: ${e}`)
+      return null
+    }
   }
 
   /**

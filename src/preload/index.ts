@@ -3,6 +3,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 export interface TaskStatusInfo {
   taskId: string
   taskName?: string
+  crudTaskId?: string
   status: 'running' | 'paused' | 'stopped' | 'completed' | 'failed'
   platform: string
   accountId?: string
@@ -18,7 +19,7 @@ export interface ElectronAPI {
     getAuth: () => Promise<unknown>
   }
   task: {
-    start: (config: { settings: unknown; accountId?: string; taskType?: string; taskName?: string }) => Promise<{ success: boolean; taskId?: string; error?: string }>
+    start: (config: { settings: unknown; accountId?: string; taskType?: string; taskName?: string; crudTaskId?: string }) => Promise<{ success: boolean; taskId?: string; error?: string }>
     stop: (taskId?: string) => Promise<{ success: boolean; error?: string }>
     pause: (taskId: string) => Promise<{ success: boolean; error?: string }>
     resume: (taskId: string) => Promise<{ success: boolean; error?: string }>

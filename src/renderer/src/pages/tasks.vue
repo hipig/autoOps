@@ -128,7 +128,8 @@ const selectedTaskHistory = computed(() => {
 
 const currentRunningTaskInfo = computed(() => {
   if (!selectedTaskId.value) return null
-  return taskStore.runningTasks.find(t => t.taskId === selectedTaskId.value || t.taskName === editingTask.value?.name)
+  // 优先用 crudTaskId 匹配，降级用 taskName 匹配
+  return taskStore.runningTasks.find(t => t.crudTaskId === selectedTaskId.value || t.taskName === editingTask.value?.name)
 })
 
 onMounted(async () => {
@@ -205,9 +206,10 @@ async function saveTask() {
   if (!selectedTaskId.value) return
 
   try {
+    const rawSettings = JSON.parse(JSON.stringify(toRaw(taskSettings.value)))
     await taskStore.updateTask(selectedTaskId.value, {
       name: editingTask.value?.name,
-      config: taskSettings.value
+      config: rawSettings
     })
     toast.success('保存成功')
   } catch (error) {
@@ -250,12 +252,13 @@ async function startTask() {
 
   try {
     const settings = toRaw(taskSettings.value)
+    const rawSettings = JSON.parse(JSON.stringify(settings))
     await taskStore.updateTask(selectedTaskId.value, {
       name: editingTask.value?.name,
-      config: settings
+      config: rawSettings
     })
     
-    await taskStore.start(settings, selectedTask.value.accountId, selectedTaskType.value, editingTask.value?.name)
+    await taskStore.start(rawSettings, selectedTask.value.accountId, selectedTaskType.value, editingTask.value?.name, selectedTaskId.value)
     toast.success('任务启动成功')
   } catch (error) {
     toast.error('启动失败:' + error)
@@ -263,7 +266,11 @@ async function startTask() {
 }
 
 async function stopTask() {
-  await taskStore.stop()
+  if (currentRunningTaskInfo.value) {
+    await taskStore.stop(currentRunningTaskInfo.value.taskId)
+  } else {
+    await taskStore.stop()
+  }
   toast.info('任务已停止')
 }
 
@@ -414,8 +421,8 @@ function getStatusColor(status: string): string {
   }
 }
 
-function getTaskStatusBadge(taskId: string): { label: string; variant: 'default' | 'secondary' | 'destructive' | 'outline' } {
-  const running = taskStore.runningTasks.find(t => t.taskId === taskId)
+function getTaskStatusBadge(crudTaskId: string): { label: string; variant: 'default' | 'secondary' | 'destructive' | 'outline' } {
+  const running = taskStore.runningTasks.find(t => t.crudTaskId === crudTaskId)
   if (running) {
     if (running.status === 'paused') return { label: '暂停', variant: 'secondary' }
     return { label: '运行中', variant: 'default' }

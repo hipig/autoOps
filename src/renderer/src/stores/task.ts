@@ -13,6 +13,7 @@ interface LogEntry {
 interface RunningTaskInfo {
   taskId: string
   taskName?: string
+  crudTaskId?: string
   status: 'running' | 'paused' | 'stopped' | 'completed' | 'failed'
   platform: string
   accountId?: string
@@ -135,14 +136,14 @@ export const useTaskStore = defineStore('task', () => {
     unsubscribeQueued = null
   }
 
-  async function start(settings: FeedAcSettingsV3, accountId?: string, taskType?: TaskType, taskName?: string) {
+  async function start(settings: FeedAcSettingsV3, accountId?: string, taskType?: TaskType, taskName?: string, crudTaskId?: string) {
     cleanupListeners()
     logs.value = []
     addLog('正在启动任务...')
 
     let result
     try {
-      result = await window.api.task.start({ settings, accountId, taskType, taskName })
+      result = await window.api.task.start({ settings, accountId, taskType, taskName, crudTaskId })
     } catch (error) {
       addLog(`启动异常: ${error}`)
       return { success: false, error: String(error) }

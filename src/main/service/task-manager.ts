@@ -11,6 +11,7 @@ import log from 'electron-log/main'
 export interface TaskStatusInfo {
   taskId: string
   taskName?: string
+  crudTaskId?: string
   status: TaskRunnerStatus
   platform: Platform
   accountId?: string
@@ -208,6 +209,10 @@ export class TaskManager extends EventEmitter {
 
     // 存储accountId到runner上以便并发控制
     ;(runner as any).accountId = config.accountId
+    // 存储 crudTaskId 和 taskName
+    ;(runner as any).crudTaskId = config.crudTaskId
+    ;(runner as any).taskName = taskName
+    ;(runner as any).startedAt = Date.now()
 
     const taskId = await runner.startWithContext(config, context)
     this.runners.set(taskId, runner)
@@ -315,6 +320,7 @@ export class TaskManager extends EventEmitter {
     return {
       taskId,
       taskName: (runner as any).taskName,
+      crudTaskId: runner.crudTaskId || undefined,
       status: runner.status,
       platform: (runner as any).platform || 'douyin',
       accountId: (runner as any).accountId,
@@ -329,6 +335,7 @@ export class TaskManager extends EventEmitter {
     return Array.from(this.runners.entries()).map(([id, runner]) => ({
       taskId: id,
       taskName: (runner as any).taskName,
+      crudTaskId: runner.crudTaskId || undefined,
       status: runner.status,
       platform: (runner as any).platform || 'douyin',
       accountId: (runner as any).accountId,

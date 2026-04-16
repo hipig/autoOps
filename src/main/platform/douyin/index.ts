@@ -142,13 +142,16 @@ export class DouyinPlatformAdapter extends BasePlatformAdapter {
 
     this.page.on('response', async (response: Response) => {
       const url = response.url()
-      if (url.includes('https://www.douyin.com/aweme/v1/web/tab/feed/')) {
+      // 匹配多种可能的 feed API URL 模式
+      if (url.includes('/aweme/v1/web/')) {
         try {
           const body = await response.json() as { aweme_list: DouyinFeedItem[] }
           if (body?.aweme_list) {
+            const count = body.aweme_list.length
             body.aweme_list.forEach((video) => {
               this.videoCache.set(video.aweme_id, video)
             })
+            log.info(`[DouyinAdapter] Feed API: cached ${count} videos, total cache: ${this.videoCache.size}`)
           }
         } catch {
         }
@@ -197,24 +200,79 @@ export class DouyinPlatformAdapter extends BasePlatformAdapter {
 
   async getVideoInfo(videoId: string): Promise<VideoInfo | null> {
     const feedItem = this.videoCache.get(videoId)
-    if (!feedItem) return null
+    if (feedItem) {
+      return {
+        videoId: feedItem.aweme_id,
+        title: feedItem.desc,
+        description: feedItem.desc,
+        author: {
+          userId: feedItem.author.uid,
+          nickname: feedItem.author.nickname,
+          verified: false
+        },
+        tags: feedItem.video_tag.map(t => t.tag_name),
+        likeCount: feedItem.statistics?.digg_count || 0,
+        collectCount: feedItem.statistics?.collect_count || 0,
+        shareCount: feedItem.statistics?.share_count || 0,
+        commentCount: feedItem.statistics?.comment_count || 0,
+        shareUrl: feedItem.share_url,
+        createTime: Date.now()
+      }
+    }
 
-    return {
-      videoId: feedItem.aweme_id,
-      title: feedItem.desc,
-      description: feedItem.desc,
-      author: {
-        userId: feedItem.author.uid,
-        nickname: feedItem.author.nickname,
-        verified: false
-      },
-      tags: feedItem.video_tag.map(t => t.tag_name),
-      likeCount: feedItem.statistics?.digg_count || 0,
-      collectCount: feedItem.statistics?.collect_count || 0,
-      shareCount: feedItem.statistics?.share_count || 0,
-      commentCount: feedItem.statistics?.comment_count || 0,
-      shareUrl: feedItem.share_url,
-      createTime: Date.now()
+    // 降级：从 DOM 提取基础信息
+    return this.getVideoInfoFromDOM(videoId)
+  }
+
+  /**
+   * 从页面 DOM 提取视频信息（API cache 未命中时的降级方案）
+   */
+  private async getVideoInfoFromDOM(videoId: string): Promise<VideoInfo | null> {
+    if (!this.page) return null
+    try {
+      const info = await this.page.evaluate((vid: string) => {
+        const activeVideo = document.querySelector('[data-e2e="feed-active-video"]')
+        if (!activeVideo) return null
+
+        // 提取作者昵称
+        const nicknameEl = activeVideo.querySelector('[data-e2e="video-nickname"]') ||
+          activeVideo.querySelector('.account-name') ||
+          activeVideo.querySelector('.author-card-user-name')
+        const nickname = nicknameEl?.textContent?.trim() || ''
+
+        // 提取视频描述
+        const descEl = activeVideo.querySelector('[data-e2e="video-desc"]') ||
+          activeVideo.querySelector('.video-desc') ||
+          activeVideo.querySelector('.desc')
+        const description = descEl?.textContent?.trim() || ''
+
+        if (!nickname && !description) return null
+
+        return {
+          videoId: vid,
+          title: description,
+          description,
+          author: {
+            userId: '',
+            nickname,
+            verified: false
+          },
+          tags: [] as string[],
+          likeCount: 0,
+          collectCount: 0,
+          shareCount: 0,
+          commentCount: 0,
+          shareUrl: '',
+          createTime: Date.now()
+        }
+      }, videoId)
+      if (info) {
+        log.info(`[DouyinAdapter] DOM fallback: extracted info for @${info.author.nickname}`)
+      }
+      return info as VideoInfo | null
+    } catch (e) {
+      log.warn(`[DouyinAdapter] DOM fallback failed: ${e}`)
+      return null
     }
   }
 

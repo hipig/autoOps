@@ -85,6 +85,7 @@ export function registerTaskIPC(): void {
     platform?: Platform
     taskType?: TaskType
     taskName?: string
+    crudTaskId?: string
   }) => {
     try {
       log.info('[TaskIPC] Received task:start request', JSON.stringify({
@@ -119,7 +120,8 @@ export function registerTaskIPC(): void {
           platform,
           taskType,
           settings,
-          accountId: config.accountId
+          accountId: config.accountId,
+          crudTaskId: config.crudTaskId
         },
         config.taskName
       )
