@@ -1,14 +1,19 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
+import type { Platform } from '../../../shared/platform'
 
 export interface Account {
   id: string
   name: string
-  platform: 'douyin'
+  platform: Platform
+  platformAccountId?: string
   avatar?: string
   storageState: unknown
+  cookies?: Record<string, string>
   createdAt: number
   isDefault: boolean
+  status: 'active' | 'inactive' | 'expired' | 'checking'
+  expiresAt?: number
 }
 
 export const useAccountStore = defineStore('account', () => {
@@ -21,6 +26,16 @@ export const useAccountStore = defineStore('account', () => {
 
   const defaultAccount = computed(() => {
     return accounts.value.find(a => a.isDefault) || null
+  })
+
+  const accountsByPlatform = computed(() => {
+    const map: Record<string, Account[]> = {}
+    for (const acc of accounts.value) {
+      const p = acc.platform || 'douyin'
+      if (!map[p]) map[p] = []
+      map[p].push(acc)
+    }
+    return map
   })
 
   async function loadAccounts() {
@@ -66,16 +81,47 @@ export const useAccountStore = defineStore('account', () => {
     currentAccountId.value = id
   }
 
+  async function checkAccountStatus(id: string) {
+    try {
+      const result = await window.api.account.checkStatus(id)
+      const account = accounts.value.find(a => a.id === id)
+      if (account) {
+        account.status = result.status as Account['status']
+        if (result.expiresAt) {
+          account.expiresAt = result.expiresAt
+        }
+      }
+      return result
+    } catch {
+      return { status: 'unknown' }
+    }
+  }
+
+  async function checkAllAccountStatuses() {
+    const promises = accounts.value
+      .filter(a => a.status === 'active' || a.status === 'expired')
+      .map(a => checkAccountStatus(a.id))
+    await Promise.all(promises)
+  }
+
+  function getAccountsByPlatform(platform: Platform): Account[] {
+    return accounts.value.filter(a => a.platform === platform)
+  }
+
   return {
     accounts,
     currentAccountId,
     currentAccount,
     defaultAccount,
+    accountsByPlatform,
     loadAccounts,
     addAccount,
     updateAccount,
     deleteAccount,
     setDefaultAccount,
-    setCurrentAccount
+    setCurrentAccount,
+    checkAccountStatus,
+    checkAllAccountStatuses,
+    getAccountsByPlatform
   }
 })

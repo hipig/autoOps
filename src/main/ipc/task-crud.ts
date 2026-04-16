@@ -3,6 +3,7 @@ import { store, StorageKey } from '../utils/storage'
 import type { Task, TaskTemplate } from '../../shared/task'
 import { generateTaskId, generateTemplateId } from '../../shared/task'
 import type { Platform, TaskType } from '../../shared/platform'
+import { getDefaultFeedAcSettingsV3 } from '../../shared/feed-ac-setting'
 
 export function registerTaskIPC(): void {
   ipcMain.handle('task:getAll', async () => {
@@ -33,17 +34,7 @@ export function registerTaskIPC(): void {
       accountId: data.accountId,
       platform: data.platform || 'douyin',
       taskType: data.taskType || 'comment',
-      config: data.config || {
-        version: 'v2',
-        ruleGroups: [],
-        blockKeywords: [],
-        authorBlockKeywords: [],
-        simulateWatchBeforeComment: false,
-        watchTimeRangeSeconds: [5, 15],
-        onlyCommentActiveVideo: false,
-        maxCount: 10,
-        aiCommentEnabled: false
-      },
+      config: data.config || getDefaultFeedAcSettingsV3(),
       createdAt: Date.now(),
       updatedAt: Date.now()
     }

@@ -9,6 +9,8 @@ interface StoreSchema {
   accounts: unknown
   tasks: unknown
   taskTemplates: unknown
+  taskConcurrency: number
+  taskSchedules: unknown
 }
 
 const store = new Store<StoreSchema>({
@@ -20,7 +22,9 @@ const store = new Store<StoreSchema>({
     taskHistory: [],
     accounts: [],
     tasks: [],
-    taskTemplates: []
+    taskTemplates: [],
+    taskConcurrency: 3,
+    taskSchedules: []
   }
 })
 
@@ -34,7 +38,9 @@ export enum StorageKey {
   TASK_HISTORY = 'taskHistory',
   ACCOUNTS = 'accounts',
   TASKS = 'tasks',
-  TASK_TEMPLATES = 'taskTemplates'
+  TASK_TEMPLATES = 'taskTemplates',
+  TASK_CONCURRENCY = 'taskConcurrency',
+  TASK_SCHEDULES = 'taskSchedules'
 }
 
 export function get<T>(key: StorageKey): T | undefined {

@@ -1,10 +1,11 @@
 import { EventEmitter } from 'events'
 import { chromium, Browser, BrowserContext, Page, type Response } from '@playwright/test'
-import { BasePlatformAdapter, VideoRecord, TaskProgress } from '../platform/base'
+import { BasePlatformAdapter, VideoRecord } from '../platform/base'
 import { createPlatformAdapter } from '../platform/factory'
-import { FeedAcSettingsV3, FeedAcRuleGroups, migrateToV3, getDefaultFeedAcSettingsV3 } from '../../shared/feed-ac-setting'
+import { DouyinPlatformAdapter } from '../platform/douyin'
+import { FeedAcSettingsV3, FeedAcRuleGroups } from '../../shared/feed-ac-setting'
 import type { Platform, TaskType, VideoInfo } from '../../shared/platform'
-import { PLATFORMS } from '../../shared/platform'
+import { PLATFORMS, PLATFORM_CONFIGS } from '../../shared/platform'
 import { store, StorageKey } from '../utils/storage'
 import { createAIService, type AIService } from '../integration/ai/factory'
 import { AISettings } from '../../shared/ai-setting'
@@ -19,22 +20,49 @@ export interface TaskRunConfig {
   accountId?: string
 }
 
+export type TaskRunnerStatus = 'running' | 'paused' | 'stopped' | 'completed' | 'failed'
+
 export class TaskRunner extends EventEmitter {
   private browser?: Browser
   private context?: BrowserContext
   private adapter?: BasePlatformAdapter
-  private stopped = false
+  private _stopped = false
+  private _paused = false
   private taskId = ''
   private currentVideoStartTime = 0
   private videoCache = new Map<string, any>()
   private aiService: AIService | null = null
+  private consecutiveSkipCount = 0
+  private platform: Platform = 'douyin'
+  private _status: TaskRunnerStatus = 'running'
+  private externalContext = false // 是否使用外部传入的context
 
+  get status(): TaskRunnerStatus {
+    return this._status
+  }
+
+  get isPaused(): boolean {
+    return this._paused
+  }
+
+  get isStopped(): boolean {
+    return this._stopped
+  }
+
+  /**
+   * 启动任务 - 自行创建浏览器实例（兼容旧调用方式）
+   */
   async start(config: TaskRunConfig): Promise<string> {
+    this.externalContext = false
     this.taskId = generateId()
-    this.stopped = false
+    this._stopped = false
+    this._paused = false
+    this._status = 'running'
 
     log.info(`TaskRunner ${this.taskId} starting...`)
     this.emit('progress', { message: `任务启动 (${PLATFORMS[config.platform].name})`, timestamp: Date.now() })
+
+    this.platform = config.platform
 
     this.browser = await chromium.launch({
       executablePath: config.browserExecPath,
@@ -74,7 +102,55 @@ export class TaskRunner extends EventEmitter {
       })
     }
 
-    await this.runTask(config)
+    // 异步执行任务循环
+    this.runTask(config).catch((err) => {
+      log.error(`TaskRunner ${this.taskId} error:`, err)
+      this._status = 'failed'
+      this.emit('stopped')
+    })
+
+    return this.taskId
+  }
+
+  /**
+   * 启动任务 - 使用外部传入的 BrowserContext（多任务并行模式）
+   */
+  async startWithContext(config: TaskRunConfig, context: BrowserContext): Promise<string> {
+    this.externalContext = true
+    this.taskId = generateId()
+    this._stopped = false
+    this._paused = false
+    this._status = 'running'
+
+    log.info(`TaskRunner ${this.taskId} starting with shared browser...`)
+    this.emit('progress', { message: `任务启动 (${PLATFORMS[config.platform].name})`, timestamp: Date.now() })
+
+    this.platform = config.platform
+    this.context = context
+    this.page = await context.newPage()
+    this.setupVideoDataListener()
+
+    this.adapter = createPlatformAdapter(config.platform)
+    this.adapter.setPage(this.page)
+    this.adapter.setVideoCache(this.videoCache)
+
+    await this.page.goto(PLATFORMS[config.platform].homeUrl)
+
+    const aiSettings = store.get(StorageKey.AI_SETTINGS) as AISettings | null
+    if (aiSettings && config.settings.aiCommentEnabled) {
+      this.aiService = createAIService(aiSettings.platform, {
+        apiKey: aiSettings.apiKeys[aiSettings.platform],
+        model: aiSettings.model,
+        temperature: aiSettings.temperature
+      })
+    }
+
+    // 异步执行任务循环
+    this.runTask(config).catch((err) => {
+      log.error(`TaskRunner ${this.taskId} error:`, err)
+      this._status = 'failed'
+      this.emit('stopped')
+    })
 
     return this.taskId
   }
@@ -84,9 +160,12 @@ export class TaskRunner extends EventEmitter {
   private setupVideoDataListener(): void {
     if (!this.page) return
 
+    const feedEndpoint = PLATFORM_CONFIGS[this.platform]?.apiEndpoints?.feed
+
     this.page.on('response', async (response: Response) => {
       const url = response.url()
-      if (url.includes('https://www.douyin.com/aweme/v1/web/tab/feed/')) {
+      const isFeed = feedEndpoint ? url.includes(feedEndpoint) : url.includes('/aweme/v1/web/tab/feed/')
+      if (isFeed) {
         try {
           const body = await response.json() as { aweme_list: any[] }
           if (body?.aweme_list) {
@@ -100,36 +179,78 @@ export class TaskRunner extends EventEmitter {
     })
   }
 
+  /**
+   * 暂停任务
+   */
+  async pause(): Promise<void> {
+    if (this._stopped) return
+    this._paused = true
+    this._status = 'paused'
+    this.log('info', '任务已暂停')
+    this.emit('paused', { taskId: this.taskId, timestamp: Date.now() })
+  }
+
+  /**
+   * 恢复任务
+   */
+  async resume(): Promise<void> {
+    if (this._stopped) return
+    this._paused = false
+    this._status = 'running'
+    this.log('info', '任务已恢复')
+    this.emit('resumed', { taskId: this.taskId, timestamp: Date.now() })
+  }
+
   async stop(): Promise<void> {
     log.info(`TaskRunner ${this.taskId} stopping...`)
-    this.stopped = true
+    this._stopped = true
+    this._paused = false
+    this._status = 'stopped'
     await this.close()
   }
 
   private async close(): Promise<void> {
     if (this.page && this.context) {
-      const state = await this.context.storageState()
-      store.set(StorageKey.AUTH, state)
-      await this.page.close()
+      try {
+        const state = await this.context.storageState()
+        store.set(StorageKey.AUTH, state)
+      } catch (e) {
+        log.warn('Failed to save storageState:', e)
+      }
+      await this.page.close().catch(() => {})
     }
-    if (this.browser) {
-      await this.browser.close()
+    // 只关闭 context，不关闭共享的 browser
+    if (this.context) {
+      await this.context.close().catch(() => {})
+    }
+    // 如果是自己创建的浏览器，需要关闭
+    if (!this.externalContext && this.browser) {
+      await this.browser.close().catch(() => {})
     }
     this.page = undefined
+    this.context = undefined
     this.browser = undefined
   }
 
   private async runTask(config: TaskRunConfig): Promise<void> {
-    const settings = config.settings.version === 'v2' ? migrateToV3(config.settings) : config.settings
+    const settings = config.settings
     const maxCount = settings.maxCount || 10
     const taskType = settings.taskType || config.taskType
+    const maxConsecutiveSkips = settings.maxConsecutiveSkips || 20
 
     this.emit('progress', { message: `任务类型: ${this.getTaskTypeName(taskType)}, 目标: ${maxCount}`, timestamp: Date.now() })
 
     let completedCount = 0
     let operationCounts: Record<string, number> = {}
+    this.consecutiveSkipCount = 0
 
-    for (let i = 0; completedCount < maxCount && !this.stopped; i++) {
+    for (let i = 0; completedCount < maxCount && !this._stopped; i++) {
+      // 暂停检查
+      while (this._paused && !this._stopped) {
+        await sleep(500)
+      }
+      if (this._stopped) break
+
       this.emit('progress', {
         message: `===== 处理第 ${i + 1} 个视频，已完成: ${completedCount}/${maxCount} =====`,
         timestamp: Date.now()
@@ -137,9 +258,43 @@ export class TaskRunner extends EventEmitter {
 
       this.currentVideoStartTime = Date.now()
 
+      const videoSwitchWaitMs = settings.videoSwitchWaitMs || 2000
+      await sleep(videoSwitchWaitMs)
+
       const videoInfo = await this.getCurrentVideoInfo()
       if (!videoInfo) {
         this.log('warn', '未获取到视频信息，跳到下一个')
+        this.consecutiveSkipCount++
+        if (this.consecutiveSkipCount >= maxConsecutiveSkips) {
+          this.log('error', `连续跳过 ${this.consecutiveSkipCount} 次，超过阈值 ${maxConsecutiveSkips}，任务暂停`)
+          break
+        }
+        await this.goToNextVideo()
+        continue
+      }
+
+      // 检查视频类型（广告/直播/图集自动跳过）
+      const videoTypeCheck = this.checkVideoType(videoInfo, settings)
+      if (videoTypeCheck.shouldSkip) {
+        this.log('info', `跳过${videoTypeCheck.reason}: @${videoInfo.author.nickname}`)
+        this.consecutiveSkipCount++
+        if (this.consecutiveSkipCount >= maxConsecutiveSkips) {
+          this.log('error', `连续跳过 ${this.consecutiveSkipCount} 次，超过阈值 ${maxConsecutiveSkips}，任务暂停`)
+          break
+        }
+        await this.goToNextVideo()
+        continue
+      }
+
+      // 检查视频分类
+      const categoryCheck = await this.checkVideoCategory(videoInfo, settings)
+      if (categoryCheck.shouldSkip) {
+        this.log('info', `跳过(${categoryCheck.reason}): @${videoInfo.author.nickname}`)
+        this.consecutiveSkipCount++
+        if (this.consecutiveSkipCount >= maxConsecutiveSkips) {
+          this.log('error', `连续跳过 ${this.consecutiveSkipCount} 次，超过阈值 ${maxConsecutiveSkips}，任务暂停`)
+          break
+        }
         await this.goToNextVideo()
         continue
       }
@@ -148,6 +303,7 @@ export class TaskRunner extends EventEmitter {
       this.log('info', `视频描述: ${videoInfo.description}`)
 
       if (this.checkBlockKeywords(videoInfo, settings)) {
+        this.consecutiveSkipCount++
         await this.goToNextVideo()
         continue
       }
@@ -156,6 +312,11 @@ export class TaskRunner extends EventEmitter {
       if (!matchedRule) {
         this.log('info', '视频不满足任务规则')
         await this.recordSkip(videoInfo, '规则不匹配')
+        this.consecutiveSkipCount++
+        if (this.consecutiveSkipCount >= maxConsecutiveSkips) {
+          this.log('error', `连续跳过 ${this.consecutiveSkipCount} 次，超过阈值 ${maxConsecutiveSkips}，任务暂停`)
+          break
+        }
         await this.goToNextVideo()
         continue
       }
@@ -168,13 +329,19 @@ export class TaskRunner extends EventEmitter {
 
       const results = await this.executeOperations(videoInfo, settings, taskType, operationCounts)
 
+      let anySuccess = false
       for (const result of results) {
         if (result.success) {
+          anySuccess = true
           completedCount++
           operationCounts[result.action] = (operationCounts[result.action] || 0) + 1
           this.log('success', `${this.getActionName(result.action)}成功 (${operationCounts[result.action]}/${maxCount})`)
           this.emit('action', { videoId: videoInfo.videoId, action: result.action, success: true })
         }
+      }
+
+      if (anySuccess) {
+        this.consecutiveSkipCount = 0
       }
 
       if (Math.random() < 0.1 && taskType !== 'like') {
@@ -183,6 +350,12 @@ export class TaskRunner extends EventEmitter {
 
       await sleep(random(1000, 3000))
       await this.goToNextVideo()
+    }
+
+    if (this._stopped) {
+      this._status = 'stopped'
+    } else {
+      this._status = 'completed'
     }
 
     this.log('success', `任务完成，共执行 ${completedCount} 次操作`)
@@ -216,7 +389,7 @@ export class TaskRunner extends EventEmitter {
           await sleep(500)
           continue
         }
-        return null
+        return this.adapter.getVideoInfo(videoId)
       }
 
       this.videoCache.delete(videoId)
@@ -231,16 +404,81 @@ export class TaskRunner extends EventEmitter {
           verified: false
         },
         tags: videoData.video_tag?.map((t: any) => t.tag_name) || [],
-        likeCount: 0,
-        collectCount: 0,
-        shareCount: 0,
-        commentCount: 0,
+        likeCount: videoData.statistics?.digg_count || 0,
+        collectCount: videoData.statistics?.collect_count || 0,
+        shareCount: videoData.statistics?.share_count || 0,
+        commentCount: videoData.statistics?.comment_count || 0,
         shareUrl: videoData.share_url || '',
-        createTime: Date.now()
-      }
+        createTime: Date.now(),
+        _raw: videoData
+      } as VideoInfo & { _raw: any }
     }
 
     return null
+  }
+
+  /**
+   * 检查视频类型，判断是否需要跳过广告/直播/图集
+   */
+  private checkVideoType(videoInfo: VideoInfo, settings: FeedAcSettingsV3): { shouldSkip: boolean; reason: string } {
+    const raw = (videoInfo as any)._raw
+    if (!raw) return { shouldSkip: false, reason: '' }
+
+    if (this.adapter instanceof DouyinPlatformAdapter) {
+      const isAd = raw.is_ads === true
+      const isLive = raw.live_info && raw.live_info.room_id
+      const awemeType = raw.aweme_type || 0
+
+      if (settings.skipAdVideo && (isAd || (awemeType !== 0 && awemeType !== 2))) {
+        if (isAd || awemeType === 1) {
+          return { shouldSkip: true, reason: '广告视频' }
+        }
+      }
+
+      if (settings.skipLiveVideo && (isLive || awemeType === 5)) {
+        return { shouldSkip: true, reason: '直播视频' }
+      }
+
+      if (settings.skipImageSet && awemeType === 2) {
+        return { shouldSkip: true, reason: '图集' }
+      }
+    }
+
+    return { shouldSkip: false, reason: '' }
+  }
+
+  /**
+   * 检查视频分类，判断是否在目标分类内
+   */
+  private async checkVideoCategory(videoInfo: VideoInfo, settings: FeedAcSettingsV3): Promise<{ shouldSkip: boolean; reason: string }> {
+    const { videoCategories } = settings
+    if (!videoCategories?.enabled) return { shouldSkip: false, reason: '' }
+
+    const { categories, customKeywords, mode, useAI } = videoCategories
+    const allKeywords = [...(categories || []), ...(customKeywords || [])]
+    if (allKeywords.length === 0) return { shouldSkip: false, reason: '' }
+
+    // 先用 video_tag 和 description 做关键词匹配
+    const textToMatch = `${videoInfo.description} ${videoInfo.tags.join(' ')}`
+    const keywordMatched = allKeywords.some(kw => textToMatch.includes(kw))
+
+    // 如果关键词未匹配且启用了AI分析，调用AI判断
+    let aiMatched = false
+    if (!keywordMatched && useAI && this.aiService) {
+      try {
+        const prompt = `判断这个视频是否属于以下分类：${allKeywords.join('、')}。视频信息：${textToMatch}`
+        const result = await this.aiService.analyzeVideoType(textToMatch, prompt)
+        aiMatched = result.shouldWatch
+      } catch {
+        this.log('warn', 'AI分类分析失败')
+      }
+    }
+
+    const matched = keywordMatched || aiMatched
+    if (mode === 'whitelist' && !matched) return { shouldSkip: true, reason: '不在目标分类' }
+    if (mode === 'blacklist' && matched) return { shouldSkip: true, reason: '在排除分类' }
+
+    return { shouldSkip: false, reason: '' }
   }
 
   private async goToNextVideo(): Promise<void> {
@@ -397,14 +635,37 @@ export class TaskRunner extends EventEmitter {
     }
 
     let commentText = ''
-    if (operation.aiEnabled && this.aiService && operation.aiPrompt) {
+    const useAI = (operation.aiEnabled || settings.aiCommentEnabled) && this.aiService
+
+    if (useAI) {
       try {
-        const result = await this.aiService.generateComment(
-          JSON.stringify({ author: videoInfo.author.nickname, videoDesc: videoInfo.description, videoTag: videoInfo.tags }),
-          operation.aiPrompt
+        let topComments: Array<{ content: string; likeCount: number }> = []
+        if (this.adapter instanceof DouyinPlatformAdapter) {
+          const refCount = settings.commentReferenceCount || 5
+          this.log('info', `获取热门评论(${refCount}条)作为AI参考...`)
+          topComments = await this.adapter.getTopComments(videoInfo.videoId, refCount)
+          if (topComments.length > 0) {
+            this.log('info', `获取到 ${topComments.length} 条热门评论`)
+          }
+        }
+
+        const result = await this.aiService!.generateComment(
+          {
+            author: videoInfo.author.nickname,
+            videoDesc: videoInfo.description,
+            videoTags: videoInfo.tags,
+            topComments
+          },
+          {
+            style: settings.commentStyle || 'mixed',
+            maxLength: settings.commentMaxLength || 50,
+            customPrompt: operation.aiPrompt
+          }
         )
         commentText = result.content
+        this.log('info', `AI生成评论: ${commentText}`)
       } catch {
+        this.log('warn', 'AI生成评论失败，使用备选评论')
         commentText = this.getRandomComment(operation.commentTexts || [])
       }
     } else {

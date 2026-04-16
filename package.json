@@ -20,6 +20,7 @@
     "@vueuse/core": "^13.9.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "cron-parser": "^5.5.0",
     "electron-log": "^5.2.4",
     "electron-store": "^8.2.0",
     "lucide-vue-next": "^1.0.0",

@@ -15,14 +15,31 @@ import log from 'electron-log/main'
 
 interface DouyinFeedItem {
   aweme_id: string
-  aweme_type: number
+  aweme_type: number // 0=普通视频, 1=广告, 2=图集, 5=直播等
   desc: string
+  is_ads?: boolean // 是否广告
+  live_info?: {
+    // 直播信息
+    room_id: string
+    status: number
+  }
   author: {
     nickname: string
     uid: string
   }
   video_tag: Array<{ tag_name: string }>
   share_url: string
+  channel_info?: {
+    channel_name: string
+    channel_id: string
+  }
+  statistics?: {
+    // 互动数据
+    digg_count: number // 点赞
+    comment_count: number // 评论
+    collect_count: number // 收藏
+    share_count: number // 分享
+  }
 }
 
 interface DouyinCommentResponse {
@@ -46,7 +63,7 @@ export class DouyinPlatformAdapter extends BasePlatformAdapter {
 
   private browser?: Browser
   private context?: BrowserContext
-  private videoCache = new Map<string, DouyinFeedItem>()
+  protected videoCache = new Map<string, DouyinFeedItem>()
   private currentVideoStartTime = 0
 
   constructor() {
@@ -139,6 +156,45 @@ export class DouyinPlatformAdapter extends BasePlatformAdapter {
     })
   }
 
+  /**
+   * 判断是否为广告或直播视频
+   */
+  isAdOrLive(feedItem: DouyinFeedItem): boolean {
+    if (feedItem.aweme_type !== 0) return true
+    if (feedItem.is_ads === true) return true
+    if (feedItem.live_info && feedItem.live_info.room_id) return true
+    return false
+  }
+
+  /**
+   * 获取视频类型描述
+   */
+  getVideoTypeDesc(feedItem: DouyinFeedItem): string {
+    if (feedItem.is_ads === true) return '广告'
+    if (feedItem.live_info && feedItem.live_info.room_id) return '直播'
+    switch (feedItem.aweme_type) {
+      case 0: return '普通视频'
+      case 2: return '图集'
+      case 5: return '直播'
+      default:
+        if (feedItem.aweme_type !== 0) return `其他类型(${feedItem.aweme_type})`
+        return '普通视频'
+    }
+  }
+
+  /**
+   * 获取热门评论（按点赞数排序取前N条）
+   */
+  async getTopComments(videoId: string, count: number = 5): Promise<Array<{ content: string; likeCount: number }>> {
+    const commentData = await this.getCommentList(videoId)
+    if (!commentData || commentData.comments.length === 0) return []
+    const sorted = [...commentData.comments].sort((a, b) => b.likeCount - a.likeCount)
+    return sorted.slice(0, count).map(c => ({
+      content: c.content,
+      likeCount: c.likeCount
+    }))
+  }
+
   async getVideoInfo(videoId: string): Promise<VideoInfo | null> {
     const feedItem = this.videoCache.get(videoId)
     if (!feedItem) return null
@@ -153,10 +209,10 @@ export class DouyinPlatformAdapter extends BasePlatformAdapter {
         verified: false
       },
       tags: feedItem.video_tag.map(t => t.tag_name),
-      likeCount: 0,
-      collectCount: 0,
-      shareCount: 0,
-      commentCount: 0,
+      likeCount: feedItem.statistics?.digg_count || 0,
+      collectCount: feedItem.statistics?.collect_count || 0,
+      shareCount: feedItem.statistics?.share_count || 0,
+      commentCount: feedItem.statistics?.comment_count || 0,
       shareUrl: feedItem.share_url,
       createTime: Date.now()
     }
@@ -200,6 +256,7 @@ export class DouyinPlatformAdapter extends BasePlatformAdapter {
       }
 
       this.page?.on('response', listener)
+      this.openCommentSection().catch(() => {})
     })
   }
 
@@ -317,7 +374,9 @@ export class DouyinPlatformAdapter extends BasePlatformAdapter {
     })
   }
 
-  async goToNextVideo(): Promise<void> {
+  private lastVideoId: string | null = null
+
+  async goToNextVideo(waitForData: boolean = true): Promise<void> {
     if (!this.page) return
 
     if (await this.isCommentSectionOpen()) {
@@ -325,11 +384,45 @@ export class DouyinPlatformAdapter extends BasePlatformAdapter {
       await this.page.waitForTimeout(500)
     }
 
+    const prevVideoId = await this.getActiveVideoId()
+    this.lastVideoId = prevVideoId
+
     await this.page.keyboard.press(this.config.keyboardShortcuts.nextVideo)
     await this.page.waitForSelector(this.config.selectors.activeVideo, {
       state: 'visible',
       timeout: 5000
     }).catch(() => null)
+
+    await this.waitForVideoIdChange(prevVideoId)
+
+    if (waitForData) {
+      await this.waitForVideoCacheData()
+    }
+  }
+
+  private async waitForVideoIdChange(prevVideoId: string | null, maxWaitMs: number = 5000): Promise<void> {
+    if (!this.page) return
+    const startTime = Date.now()
+    while (Date.now() - startTime < maxWaitMs) {
+      const newVideoId = await this.getActiveVideoId()
+      if (newVideoId && newVideoId !== prevVideoId) {
+        return
+      }
+      await sleep(300)
+    }
+  }
+
+  private async waitForVideoCacheData(maxWaitMs: number = 3000): Promise<void> {
+    const currentVideoId = await this.getActiveVideoId()
+    if (!currentVideoId) return
+
+    if (this.videoCache.has(currentVideoId)) return
+
+    const startTime = Date.now()
+    while (Date.now() - startTime < maxWaitMs) {
+      if (this.videoCache.has(currentVideoId)) return
+      await sleep(300)
+    }
   }
 
   async openCommentSection(): Promise<void> {

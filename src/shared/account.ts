@@ -10,7 +10,7 @@ export interface Account {
   cookies?: Record<string, string>
   createdAt: number
   isDefault: boolean
-  status: 'active' | 'inactive' | 'expired'
+  status: 'active' | 'inactive' | 'expired' | 'checking'
   expiresAt?: number
 }
 
@@ -22,7 +22,7 @@ export interface AccountListItem {
   avatar?: string
   createdAt: number
   isDefault: boolean
-  status: 'active' | 'inactive' | 'expired'
+  status: 'active' | 'inactive' | 'expired' | 'checking'
 }
 
 export function generateAccountId(): string {

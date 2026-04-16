@@ -1,6 +1,13 @@
-import type { FeedAcSettingsV2 } from './feed-ac-setting'
-import { getDefaultFeedAcSettings } from './feed-ac-setting'
+import type { FeedAcSettingsV3 } from './feed-ac-setting'
+import { getDefaultFeedAcSettingsV3 } from './feed-ac-setting'
 import type { Platform, TaskType } from './platform'
+
+export interface TaskSchedule {
+  enabled: boolean
+  cron: string              // cron 表达式
+  nextRunAt?: number        // 下次执行时间
+  lastRunAt?: number        // 上次执行时间
+}
 
 export interface Task {
   id: string
@@ -8,7 +15,8 @@ export interface Task {
   accountId: string
   platform: Platform
   taskType: TaskType
-  config: FeedAcSettingsV2
+  config: FeedAcSettingsV3
+  schedule?: TaskSchedule
   createdAt: number
   updatedAt: number
 }
@@ -18,13 +26,13 @@ export interface TaskTemplate {
   name: string
   platform: Platform
   taskType: TaskType
-  config: FeedAcSettingsV2
+  config: FeedAcSettingsV3
   createdAt: number
 }
 
-export interface ComboTaskConfig extends FeedAcSettingsV2 {
+export interface ComboTaskConfig extends Omit<FeedAcSettingsV3, 'operations'> {
   operations: Array<{
-    type: TaskType
+    type: Exclude<TaskType, 'combo'>
     enabled: boolean
     probability: number
     maxCount?: number
@@ -46,7 +54,7 @@ export function getDefaultTask(accountId: string, platform: Platform = 'douyin')
     accountId,
     platform,
     taskType: 'comment',
-    config: getDefaultFeedAcSettings(),
+    config: getDefaultFeedAcSettingsV3(),
     createdAt: Date.now(),
     updatedAt: Date.now()
   }

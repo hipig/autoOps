@@ -37,7 +37,7 @@ export abstract class BasePlatformAdapter extends EventEmitter {
   abstract follow(userId: string): Promise<OperationResult>
   abstract comment(videoId: string, content: string): Promise<CommentResult>
 
-  abstract goToNextVideo(): Promise<void>
+  abstract goToNextVideo(waitForData?: boolean): Promise<void>
   abstract openCommentSection(): Promise<void>
   abstract closeCommentSection(): Promise<void>
   abstract isCommentSectionOpen(): Promise<boolean>
@@ -52,7 +52,7 @@ export abstract class BasePlatformAdapter extends EventEmitter {
     return this.videoCache
   }
 
-  protected setPage(page: Page): void {
+  setPage(page: Page): void {
     this.page = page
   }
 

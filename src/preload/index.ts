@@ -1,5 +1,15 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
+export interface TaskStatusInfo {
+  taskId: string
+  taskName?: string
+  status: 'running' | 'paused' | 'stopped' | 'completed' | 'failed'
+  platform: string
+  accountId?: string
+  startedAt: number
+  progress?: string
+}
+
 export interface ElectronAPI {
   auth: {
     hasAuth: () => Promise<boolean>
@@ -8,11 +18,29 @@ export interface ElectronAPI {
     getAuth: () => Promise<unknown>
   }
   task: {
-    start: (config: { settings: unknown; accountId?: string; taskType?: string }) => Promise<{ success: boolean; taskId?: string; error?: string }>
-    stop: () => Promise<{ success: boolean; error?: string }>
-    status: () => Promise<{ running: boolean }>
-    onProgress: (callback: (data: { message: string; timestamp: number }) => void) => void
-    onAction: (callback: (data: { videoId: string; action: string; success: boolean }) => void) => void
+    start: (config: { settings: unknown; accountId?: string; taskType?: string; taskName?: string }) => Promise<{ success: boolean; taskId?: string; error?: string }>
+    stop: (taskId?: string) => Promise<{ success: boolean; error?: string }>
+    pause: (taskId: string) => Promise<{ success: boolean; error?: string }>
+    resume: (taskId: string) => Promise<{ success: boolean; error?: string }>
+    status: (taskId?: string) => Promise<{ running: boolean; tasks?: TaskStatusInfo[] }>
+    listRunning: () => Promise<TaskStatusInfo[]>
+    getStatus: (taskId: string) => Promise<TaskStatusInfo | null>
+    queueSize: () => Promise<{ size: number }>
+    removeFromQueue: (queueId: string) => Promise<{ success: boolean }>
+    schedule: (taskId: string, cron: string) => Promise<{ success: boolean; error?: string }>
+    cancelSchedule: (taskId: string) => Promise<{ success: boolean }>
+    getSchedules: () => Promise<Array<{ taskId: string; cron: string; enabled: boolean; nextRunAt?: number; lastRunAt?: number }>>
+    setConcurrency: (max: number) => Promise<{ success: boolean }>
+    getConcurrency: () => Promise<{ maxConcurrency: number }>
+    stopAll: () => Promise<{ success: boolean; error?: string }>
+    onProgress: (callback: (data: { message: string; timestamp: number; taskId?: string }) => void) => () => void
+    onAction: (callback: (data: { videoId: string; action: string; success: boolean; taskId?: string }) => void) => () => void
+    onPaused: (callback: (data: { taskId: string; timestamp: number }) => void) => () => void
+    onResumed: (callback: (data: { taskId: string; timestamp: number }) => void) => () => void
+    onStarted: (callback: (data: { taskId: string; taskName?: string }) => void) => () => void
+    onStopped: (callback: (data: { taskId: string; status: string }) => void) => () => void
+    onQueued: (callback: (data: { queueId: string; taskName?: string }) => void) => () => void
+    onScheduleTriggered: (callback: (data: { taskId: string; cron: string }) => void) => () => void
   }
   'feed-ac-settings': {
     get: () => Promise<unknown>
@@ -44,6 +72,7 @@ export interface ElectronAPI {
     getById: (id: string) => Promise<unknown | null>
     getByPlatform: (platform: string) => Promise<unknown[]>
     getActiveAccounts: () => Promise<unknown[]>
+    checkStatus: (id: string) => Promise<{ status: string; expiresAt?: number }>
   }
   login: {
     douyin: () => Promise<{ success: boolean; storageState?: string; error?: string; userInfo?: { nickname: string; avatar?: string; uniqueId?: string } }>
@@ -92,6 +121,12 @@ export interface ElectronAPI {
   }
 }
 
+function createIPCListener(channel: string, callback: (data: any) => void): () => void {
+  const listener = (_event: any, data: any) => callback(data)
+  ipcRenderer.on(channel, listener)
+  return () => ipcRenderer.removeListener(channel, listener)
+}
+
 const api: ElectronAPI = {
   auth: {
     hasAuth: () => ipcRenderer.invoke('auth:hasAuth'),
@@ -101,18 +136,28 @@ const api: ElectronAPI = {
   },
   task: {
     start: (config) => ipcRenderer.invoke('task:start', config),
-    stop: () => ipcRenderer.invoke('task:stop'),
-    status: () => ipcRenderer.invoke('task:status'),
-    onProgress: (callback) => {
-      const listener = (_event: any, data: any) => callback(data)
-      ipcRenderer.on('task:progress', listener)
-      return () => ipcRenderer.removeListener('task:progress', listener)
-    },
-    onAction: (callback) => {
-      const listener = (_event: any, data: any) => callback(data)
-      ipcRenderer.on('task:action', listener)
-      return () => ipcRenderer.removeListener('task:action', listener)
-    }
+    stop: (taskId) => ipcRenderer.invoke('task:stop', taskId),
+    pause: (taskId) => ipcRenderer.invoke('task:pause', taskId),
+    resume: (taskId) => ipcRenderer.invoke('task:resume', taskId),
+    status: (taskId) => ipcRenderer.invoke('task:status', taskId),
+    listRunning: () => ipcRenderer.invoke('task:list-running'),
+    getStatus: (taskId) => ipcRenderer.invoke('task:get-status', taskId),
+    queueSize: () => ipcRenderer.invoke('task:queue-size'),
+    removeFromQueue: (queueId) => ipcRenderer.invoke('task:remove-from-queue', queueId),
+    schedule: (taskId, cron) => ipcRenderer.invoke('task:schedule', taskId, cron),
+    cancelSchedule: (taskId) => ipcRenderer.invoke('task:cancel-schedule', taskId),
+    getSchedules: () => ipcRenderer.invoke('task:get-schedules'),
+    setConcurrency: (max) => ipcRenderer.invoke('task:set-concurrency', max),
+    getConcurrency: () => ipcRenderer.invoke('task:get-concurrency'),
+    stopAll: () => ipcRenderer.invoke('task:stop-all'),
+    onProgress: (callback) => createIPCListener('task:progress', callback),
+    onAction: (callback) => createIPCListener('task:action', callback),
+    onPaused: (callback) => createIPCListener('task:paused', callback),
+    onResumed: (callback) => createIPCListener('task:resumed', callback),
+    onStarted: (callback) => createIPCListener('task:started', callback),
+    onStopped: (callback) => createIPCListener('task:stopped', callback),
+    onQueued: (callback) => createIPCListener('task:queued', callback),
+    onScheduleTriggered: (callback) => createIPCListener('task:scheduleTriggered', callback)
   },
   'feed-ac-settings': {
     get: () => ipcRenderer.invoke('feed-ac-settings:get'),
@@ -143,7 +188,8 @@ const api: ElectronAPI = {
     getDefault: () => ipcRenderer.invoke('account:getDefault'),
     getById: (id) => ipcRenderer.invoke('account:getById', id),
     getByPlatform: (platform) => ipcRenderer.invoke('account:getByPlatform', platform),
-    getActiveAccounts: () => ipcRenderer.invoke('account:getActiveAccounts')
+    getActiveAccounts: () => ipcRenderer.invoke('account:getActiveAccounts'),
+    checkStatus: (id) => ipcRenderer.invoke('account:check-status', id)
   },
   login: {
     douyin: () => ipcRenderer.invoke('login:douyin')

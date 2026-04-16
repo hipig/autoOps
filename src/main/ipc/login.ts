@@ -1,7 +1,8 @@
-import { ipcMain } from 'electron'
+import { ipcMain, BrowserWindow } from 'electron'
 import { join } from 'path'
 import { get } from '../utils/storage'
-import { StorageKey } from '../utils/storage'
+import { StorageKey, store } from '../utils/storage'
+import log from 'electron-log/main'
 
 interface LoginResult {
   success: boolean
@@ -12,6 +13,73 @@ interface LoginResult {
     avatar?: string
     uniqueId?: string
   }
+}
+
+async function extractNickname(page: any): Promise<string | null> {
+  return page.evaluate(() => {
+    const selectors = [
+      '[data-e2e="profile-nickname"]',
+      '[class*="nickname"]',
+      '[class*="user-name"]',
+      '.author-name',
+      '.profile-name',
+      'a[href*="/user/"]',
+      '[class*="header"] [class*="name"]'
+    ]
+    for (const selector of selectors) {
+      try {
+        const el = document.querySelector(selector)
+        if (el) {
+          const text = el.textContent?.trim()
+          if (text && text.length > 0 && text.length < 50 && !text.includes('登录') && !text.includes('register')) {
+            return text
+          }
+        }
+      } catch {}
+    }
+    const url = window.location.href
+    if (url.includes('/user/')) {
+      const match = url.match(/\/user\/([^/?#]+)/)
+      if (match) return match[1]
+    }
+    return null
+  })
+}
+
+async function extractAvatar(page: any): Promise<string | undefined> {
+  return page.evaluate(() => {
+    const selectors = [
+      '[data-e2e="profile-avatar"] img',
+      '[class*="avatar"] img',
+      '[class*="user-avatar"] img',
+      'img[class*="avatar"]'
+    ]
+    for (const selector of selectors) {
+      try {
+        const img = document.querySelector(selector)
+        if (img && img.getAttribute('src')) {
+          return img.getAttribute('src') || undefined
+        }
+      } catch {}
+    }
+    return undefined
+  })
+}
+
+async function extractUniqueId(page: any): Promise<string | undefined> {
+  return page.evaluate(() => {
+    const url = window.location.href
+    const patterns = [
+      /\/user\/([^/?#]+)/,
+      /\/user\/profile\/([^/?#]+)/,
+      /\#\/follow\/([^/?#]+)/
+    ]
+    for (const pattern of patterns) {
+      const match = url.match(pattern)
+      if (match) return match[1]
+    }
+    return undefined
+  })
 }
 
 export function registerLoginIPC(): void {
@@ -43,99 +111,53 @@ export function registerLoginIPC(): void {
       await page.goto('https://www.douyin.com/', { waitUntil: 'load', timeout: 60000 })
       await page.waitForTimeout(3000)
 
-      console.log('Waiting for user to login...')
+      log.info('[Login] Waiting for user to login...')
 
       try {
         await page.waitForURL(/\#\/follow|\/user\/|user\/profile/, { timeout: 120000 })
-        console.log('Login detected, current URL:', page.url())
-      } catch (e) {
-        console.log('URL wait timeout, checking current state...')
+        log.info('[Login] Login detected, current URL:', page.url())
+      } catch {
+        log.info('[Login] URL wait timeout, checking current state...')
       }
+
+      await page.waitForTimeout(2000)
 
       let userInfo: LoginResult['userInfo'] = undefined
 
-      try {
-        const pageContent = await page.content()
-        console.log('Page loaded, content length:', pageContent.length)
+      // 重试获取 nickname，最多3次
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const nickname = await extractNickname(page)
+          const avatar = await extractAvatar(page)
+          const uniqueId = await extractUniqueId(page)
 
-        const nickname = await page.evaluate(() => {
-          const selectors = [
-            '[data-e2e="profile-nickname"]',
-            '[class*="nickname"]',
-            '[class*="user-name"]',
-            '.author-name',
-            '.profile-name',
-            'a[href*="/user/"]',
-            '[class*="header"] [class*="name"]'
-          ]
-          for (const selector of selectors) {
-            try {
-              const el = document.querySelector(selector)
-              if (el) {
-                const text = el.textContent?.trim()
-                if (text && text.length > 0 && text.length < 50 && !text.includes('登录') && !text.includes('register')) {
-                  return text
-                }
-              }
-            } catch {}
+          if (nickname) {
+            log.info(`[Login] Extracted user info (attempt ${attempt + 1})`)
+            userInfo = { nickname, avatar, uniqueId }
+            break
+          } else {
+            log.info(`[Login] No nickname found on attempt ${attempt + 1}, retrying...`)
+            await page.waitForTimeout(2000)
+            if (attempt < 2) {
+              await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {})
+              await page.waitForTimeout(3000)
+            }
           }
-          const url = window.location.href
-          if (url.includes('/user/')) {
-            const match = url.match(/\/user\/([^/?#]+)/)
-            if (match) return match[1]
-          }
-          return null
-        })
-
-        const avatar = await page.evaluate(() => {
-          const selectors = [
-            '[data-e2e="profile-avatar"] img',
-            '[class*="avatar"] img',
-            '[class*="user-avatar"] img',
-            'img[class*="avatar"]'
-          ]
-          for (const selector of selectors) {
-            try {
-              const img = document.querySelector(selector)
-              if (img && img.getAttribute('src')) {
-                return img.getAttribute('src')
-              }
-            } catch {}
-          }
-          return undefined
-        })
-
-        const uniqueId = await page.evaluate(() => {
-          const url = window.location.href
-          const patterns = [
-            /\/user\/([^/?#]+)/,
-            /\/user\/profile\/([^/?#]+)/,
-            /\#\/follow\/([^/?#]+)/
-          ]
-          for (const pattern of patterns) {
-            const match = url.match(pattern)
-            if (match) return match[1]
-          }
-          return undefined
-        })
-
-        console.log('Extracted user info:', { nickname, avatar, uniqueId })
-
-        if (nickname) {
-          userInfo = { nickname, avatar, uniqueId }
-        } else {
-          console.log('No nickname found, using default')
-          userInfo = { nickname: '抖音用户', avatar, uniqueId }
+        } catch (e) {
+          log.info(`[Login] Failed to extract user info on attempt ${attempt + 1}:`, e)
+          await page.waitForTimeout(1000)
         }
-      } catch (e) {
-        console.log('Failed to extract user info:', e)
+      }
+
+      if (!userInfo) {
+        log.info('[Login] All attempts failed, using default nickname')
         userInfo = { nickname: '抖音用户' }
       }
 
       const cookies = await context.cookies()
-      console.log('Cookies count:', cookies.length)
+      log.info('[Login] Cookies count:', cookies.length)
       const storageState = {
-        cookies: cookies.map((c: { name: string; value: string; domain: string; path: string; expires: number; httpOnly: boolean; secure: boolean; sameSite: string }) => ({
+        cookies: cookies.map((c: any) => ({
           name: c.name,
           value: c.value,
           domain: c.domain,
@@ -147,18 +169,16 @@ export function registerLoginIPC(): void {
         })),
         origins: []
       }
-      console.log('StorageState prepared, cookies:', storageState.cookies.length)
 
       await context.close()
 
-      console.log('Returning result:', { success: true, userInfo })
       return {
         success: true,
         storageState: JSON.stringify(storageState),
         userInfo
       }
     } catch (error) {
-      console.error('Douyin login error:', error)
+      log.error('[Login] Douyin login error:', error)
       return {
         success: false,
         error: error instanceof Error ? error.message : '登录过程发生错误'

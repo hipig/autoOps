@@ -26,7 +26,7 @@ export class XiaohongshuPlatformAdapter extends BasePlatformAdapter {
 
   private browser?: Browser
   private context?: BrowserContext
-  private noteCache = new Map<string, XiaohongshuNote>()
+  protected noteCache = new Map<string, XiaohongshuNote>()
   private currentNoteStartTime = 0
 
   constructor() {
@@ -209,7 +209,7 @@ export class XiaohongshuPlatformAdapter extends BasePlatformAdapter {
     }
   }
 
-  async goToNextVideo(): Promise<void> {
+  async goToNextVideo(waitForData?: boolean): Promise<void> {
     if (!this.page) return
 
     if (await this.isCommentSectionOpen()) {

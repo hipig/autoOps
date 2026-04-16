@@ -1,9 +1,9 @@
 import { ipcMain } from 'electron'
 import { store, StorageKey } from '../utils/storage'
 import type { Platform } from '../../shared/platform'
-import type { Account } from '../../shared/account'
+import { checkAccountLoginStatus, checkAllAccountStatuses } from '../service/account-monitor'
 
-export interface Account {
+interface Account {
   id: string
   name: string
   platform: Platform
@@ -13,7 +13,7 @@ export interface Account {
   cookies?: Record<string, string>
   createdAt: number
   isDefault: boolean
-  status: 'active' | 'inactive' | 'expired'
+  status: 'active' | 'inactive' | 'expired' | 'checking'
   expiresAt?: number
 }
 
@@ -96,5 +96,32 @@ export function registerAccountIPC(): void {
   ipcMain.handle('account:getActiveAccounts', async (): Promise<Account[]> => {
     const accounts = getAccounts()
     return accounts.filter(a => a.status === 'active')
+  })
+
+  // 账号状态检查
+  ipcMain.handle('account:check-status', async (_, id: string) => {
+    const accounts = getAccounts()
+    const account = accounts.find(a => a.id === id)
+    if (!account) {
+      return { status: 'inactive', message: 'Account not found' }
+    }
+    const result = await checkAccountLoginStatus(account as any)
+    // 更新存储
+    if (result.status !== account.status) {
+      const idx = accounts.findIndex(a => a.id === id)
+      if (idx !== -1) {
+        accounts[idx].status = result.status
+        if (result.expiresAt) {
+          accounts[idx].expiresAt = result.expiresAt
+        }
+        setAccounts(accounts)
+      }
+    }
+    return result
+  })
+
+  // 批量检查所有账号状态
+  ipcMain.handle('account:check-all-status', async () => {
+    return await checkAllAccountStatuses()
   })
 }

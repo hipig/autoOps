@@ -53,13 +53,18 @@ import {
   ThumbsUp,
   Bookmark,
   UserPlus,
-  Eye
+  Eye,
+  Pause,
+  RotateCcw,
+  Timer,
+  Settings2
 } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 import { useTaskStore } from '@/stores/task'
 import { useAccountStore } from '@/stores/account'
 import type { Task } from '@/../../shared/task'
-import type { FeedAcSettingsV2, FeedAcRuleGroups } from '@/../../shared/feed-ac-setting'
+import type { FeedAcSettingsV3, FeedAcRuleGroups, CommentStyle, CategoryMode, VideoCategoryConfig } from '@/../../shared/feed-ac-setting'
+import { getDefaultFeedAcSettingsV3, migrateToV3, PRESET_CATEGORIES } from '@/../../shared/feed-ac-setting'
 import type { TaskHistoryRecord } from '@/../../shared/task-history'
 import type { TaskType } from '@/../../shared/platform'
 
@@ -73,6 +78,8 @@ const isCreating = ref(false)
 const showCreateDialog = ref(false)
 const showTemplateDialog = ref(false)
 const showDeleteDialog = ref(false)
+const showScheduleDialog = ref(false)
+const showConcurrencyDialog = ref(false)
 const taskHistory = ref<TaskHistoryRecord[]>([])
 const selectedAccountId = ref<string | null>(null)
 
@@ -81,17 +88,7 @@ const newTaskType = ref<TaskType>('comment')
 const templateName = ref('')
 
 const editingTask = ref<Task | null>(null)
-const taskSettings = ref<FeedAcSettingsV2>({
-  version: 'v2',
-  ruleGroups: [],
-  blockKeywords: [],
-  authorBlockKeywords: [],
-  simulateWatchBeforeComment: false,
-  watchTimeRangeSeconds: [5, 15],
-  onlyCommentActiveVideo: false,
-  maxCount: 10,
-  aiCommentEnabled: false
-})
+const taskSettings = ref<FeedAcSettingsV3>(getDefaultFeedAcSettingsV3())
 
 const selectedTaskType = ref<TaskType>('comment')
 const operationConfigs = ref([
@@ -110,6 +107,9 @@ const newRuleGroup = ref<Partial<FeedAcRuleGroups>>({
 
 const newBlockKeyword = ref('')
 const newAuthorBlockKeyword = ref('')
+const newCustomCategoryKeyword = ref('')
+const scheduleCron = ref('')
+const concurrencyInput = ref(3)
 
 const filteredTasks = computed(() => {
   if (!selectedAccountId.value || selectedAccountId.value === '__all__') return taskStore.tasks
@@ -126,11 +126,18 @@ const selectedTaskHistory = computed(() => {
   return taskHistory.value.filter(h => h.id.includes(selectedTaskId.value!) || h.id.startsWith(selectedTaskId.value!.split('-').pop() || ''))
 })
 
+const currentRunningTaskInfo = computed(() => {
+  if (!selectedTaskId.value) return null
+  return taskStore.runningTasks.find(t => t.taskId === selectedTaskId.value || t.taskName === editingTask.value?.name)
+})
+
 onMounted(async () => {
   await Promise.all([
     taskStore.loadTasks(),
     taskStore.loadTemplates(),
-    accountStore.loadAccounts()
+    accountStore.loadAccounts(),
+    taskStore.loadRunningTasks(),
+    taskStore.loadConcurrency()
   ])
   taskHistory.value = await window.api['task-history'].getAll() as TaskHistoryRecord[]
 
@@ -147,7 +154,16 @@ onMounted(async () => {
 watch(selectedTask, (task) => {
   if (task) {
     editingTask.value = { ...task }
-    taskSettings.value = JSON.parse(JSON.stringify(task.config))
+    const config = task.config as any
+    if (config.version === 'v2') {
+      taskSettings.value = migrateToV3(config)
+    } else {
+      taskSettings.value = { ...getDefaultFeedAcSettingsV3(), ...config }
+      // 确保 videoCategories 存在
+      if (!taskSettings.value.videoCategories) {
+        taskSettings.value.videoCategories = { enabled: false, mode: 'whitelist', categories: [], customKeywords: [], useAI: false }
+      }
+    }
     selectedTaskType.value = (task as any).taskType || 'comment'
   } else {
     editingTask.value = null
@@ -155,17 +171,7 @@ watch(selectedTask, (task) => {
 })
 
 watch(selectedTaskId, () => {
-  taskSettings.value = {
-    version: 'v2',
-    ruleGroups: [],
-    blockKeywords: [],
-    authorBlockKeywords: [],
-    simulateWatchBeforeComment: false,
-    watchTimeRangeSeconds: [5, 15],
-    onlyCommentActiveVideo: false,
-    maxCount: 10,
-    aiCommentEnabled: false
-  }
+  taskSettings.value = getDefaultFeedAcSettingsV3()
 })
 
 async function createTask() {
@@ -249,10 +255,9 @@ async function startTask() {
       config: settings
     })
     
-    await taskStore.start(settings, selectedTask.value.accountId, selectedTaskType.value)
+    await taskStore.start(settings, selectedTask.value.accountId, selectedTaskType.value, editingTask.value?.name)
     toast.success('任务启动成功')
   } catch (error) {
-    console.log('启动失败:' + error);
     toast.error('启动失败:' + error)
   }
 }
@@ -260,6 +265,49 @@ async function startTask() {
 async function stopTask() {
   await taskStore.stop()
   toast.info('任务已停止')
+}
+
+async function pauseCurrentTask() {
+  if (!currentRunningTaskInfo.value) return
+  const result = await taskStore.pauseTask(currentRunningTaskInfo.value.taskId)
+  if (result.success) toast.info('任务已暂停')
+  else toast.error('暂停失败: ' + result.error)
+}
+
+async function resumeCurrentTask() {
+  if (!currentRunningTaskInfo.value) return
+  const result = await taskStore.resumeTask(currentRunningTaskInfo.value.taskId)
+  if (result.success) toast.info('任务已恢复')
+  else toast.error('恢复失败: ' + result.error)
+}
+
+async function handleSchedule() {
+  if (!selectedTaskId.value || !scheduleCron.value.trim()) {
+    toast.error('请输入 Cron 表达式')
+    return
+  }
+  const result = await taskStore.scheduleTask(selectedTaskId.value, scheduleCron.value)
+  if (result.success) {
+    toast.success('定时任务设置成功')
+    showScheduleDialog.value = false
+    scheduleCron.value = ''
+  } else {
+    toast.error('设置失败: ' + result.error)
+  }
+}
+
+async function handleCancelSchedule() {
+  if (!selectedTaskId.value) return
+  const result = await taskStore.cancelSchedule(selectedTaskId.value)
+  if (result.success) toast.success('定时任务已取消')
+  else toast.error('取消失败')
+}
+
+async function handleSetConcurrency() {
+  const result = await taskStore.setConcurrency(concurrencyInput.value)
+  if (result.success) toast.success(`最大并行数设置为 ${concurrencyInput.value}`)
+  else toast.error('设置失败')
+  showConcurrencyDialog.value = false
 }
 
 async function saveAsTemplate() {
@@ -278,7 +326,7 @@ async function saveAsTemplate() {
   }
 }
 
-function applyTemplate(config: FeedAcSettingsV2) {
+function applyTemplate(config: FeedAcSettingsV3) {
   taskSettings.value = JSON.parse(JSON.stringify(config))
   toast.success('模板已应用')
 }
@@ -332,6 +380,25 @@ function removeCommentText(group: FeedAcRuleGroups, index: number) {
   group.commentTexts?.splice(index, 1)
 }
 
+function addCustomCategoryKeyword() {
+  if (!newCustomCategoryKeyword.value) return
+  taskSettings.value.videoCategories.customKeywords.push(newCustomCategoryKeyword.value)
+  newCustomCategoryKeyword.value = ''
+}
+
+function removeCustomCategoryKeyword(index: number) {
+  taskSettings.value.videoCategories.customKeywords.splice(index, 1)
+}
+
+function togglePresetCategory(cat: string) {
+  const idx = taskSettings.value.videoCategories.categories.indexOf(cat)
+  if (idx >= 0) {
+    taskSettings.value.videoCategories.categories.splice(idx, 1)
+  } else {
+    taskSettings.value.videoCategories.categories.push(cat)
+  }
+}
+
 function formatTime(timestamp: number): string {
   return new Date(timestamp).toLocaleString('zh-CN')
 }
@@ -340,10 +407,20 @@ function getStatusColor(status: string): string {
   switch (status) {
     case 'completed': return 'text-green-600'
     case 'running': return 'text-blue-600'
-    case 'stopped': return 'text-yellow-600'
-    case 'error': return 'text-red-600'
+    case 'paused': return 'text-yellow-600'
+    case 'stopped': return 'text-gray-600'
+    case 'error': case 'failed': return 'text-red-600'
     default: return ''
   }
+}
+
+function getTaskStatusBadge(taskId: string): { label: string; variant: 'default' | 'secondary' | 'destructive' | 'outline' } {
+  const running = taskStore.runningTasks.find(t => t.taskId === taskId)
+  if (running) {
+    if (running.status === 'paused') return { label: '暂停', variant: 'secondary' }
+    return { label: '运行中', variant: 'default' }
+  }
+  return { label: '就绪', variant: 'outline' }
 }
 
 function getAccountName(accountId: string): string {
@@ -362,78 +439,112 @@ function getTaskName(taskId: string): string {
     <div class="w-80 border-r bg-card p-4 flex flex-col">
       <div class="flex items-center justify-between mb-4">
         <h2 class="text-lg font-semibold">任务列表</h2>
-        <Dialog v-model:open="showCreateDialog">
-          <DialogTrigger as-child>
-            <Button size="sm">
-              <Plus class="w-4 h-4 mr-1" />
-              新建
-            </Button>
-          </DialogTrigger>
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>创建新任务</DialogTitle>
-              <DialogDescription>为任务选择一个账号、类型和名称</DialogDescription>
-            </DialogHeader>
-            <div class="space-y-4 py-4">
-              <div class="space-y-2">
-                <Label>任务名称</Label>
-                <Input v-model="newTaskName" placeholder="输入任务名称" />
+        <div class="flex gap-1">
+          <Dialog v-model:open="showConcurrencyDialog">
+            <DialogTrigger as-child>
+              <Button size="sm" variant="ghost">
+                <Settings2 class="w-4 h-4" />
+              </Button>
+            </DialogTrigger>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>并行设置</DialogTitle>
+                <DialogDescription>设置同时运行的最大任务数</DialogDescription>
+              </DialogHeader>
+              <div class="py-4 space-y-4">
+                <div class="space-y-2">
+                  <Label>最大并行数</Label>
+                  <Input type="number" v-model.number="concurrencyInput" min="1" max="10" />
+                  <p class="text-xs text-muted-foreground">当前: {{ taskStore.maxConcurrency }}，推荐 2-3</p>
+                </div>
               </div>
-              <div class="space-y-2">
-                <Label>关联账号</Label>
-                <Select v-model="selectedAccountId">
-                  <SelectTrigger>
-                    <SelectValue placeholder="选择账号" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem v-for="account in accountStore.accounts" :key="account.id" :value="account.id">
-                      {{ (account as any).name || '未命名账号' }}
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
+              <DialogFooter>
+                <Button variant="outline" @click="showConcurrencyDialog = false">取消</Button>
+                <Button @click="handleSetConcurrency">设置</Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+          <Dialog v-model:open="showCreateDialog">
+            <DialogTrigger as-child>
+              <Button size="sm">
+                <Plus class="w-4 h-4 mr-1" />
+                新建
+              </Button>
+            </DialogTrigger>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>创建新任务</DialogTitle>
+                <DialogDescription>为任务选择一个账号、类型和名称</DialogDescription>
+              </DialogHeader>
+              <div class="space-y-4 py-4">
+                <div class="space-y-2">
+                  <Label>任务名称</Label>
+                  <Input v-model="newTaskName" placeholder="输入任务名称" />
+                </div>
+                <div class="space-y-2">
+                  <Label>关联账号</Label>
+                  <Select v-model="selectedAccountId">
+                    <SelectTrigger>
+                      <SelectValue placeholder="选择账号" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem v-for="account in accountStore.accounts" :key="account.id" :value="account.id">
+                        {{ (account as any).name || '未命名账号' }}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div class="space-y-2">
+                  <Label>任务类型</Label>
+                  <Select v-model="newTaskType">
+                    <SelectTrigger>
+                      <SelectValue placeholder="选择任务类型" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="comment">
+                        <div class="flex items-center gap-2">
+                          <MessageSquare class="w-4 h-4" /> 评论任务
+                        </div>
+                      </SelectItem>
+                      <SelectItem value="like">
+                        <div class="flex items-center gap-2">
+                          <ThumbsUp class="w-4 h-4" /> 点赞任务
+                        </div>
+                      </SelectItem>
+                      <SelectItem value="collect">
+                        <div class="flex items-center gap-2">
+                          <Bookmark class="w-4 h-4" /> 收藏任务
+                        </div>
+                      </SelectItem>
+                      <SelectItem value="follow">
+                        <div class="flex items-center gap-2">
+                          <UserPlus class="w-4 h-4" /> 关注任务
+                        </div>
+                      </SelectItem>
+                      <SelectItem value="combo">
+                        <div class="flex items-center gap-2">
+                          <ListTodo class="w-4 h-4" /> 组合任务
+                        </div>
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
               </div>
-              <div class="space-y-2">
-                <Label>任务类型</Label>
-                <Select v-model="newTaskType">
-                  <SelectTrigger>
-                    <SelectValue placeholder="选择任务类型" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="comment">
-                      <div class="flex items-center gap-2">
-                        <MessageSquare class="w-4 h-4" /> 评论任务
-                      </div>
-                    </SelectItem>
-                    <SelectItem value="like">
-                      <div class="flex items-center gap-2">
-                        <ThumbsUp class="w-4 h-4" /> 点赞任务
-                      </div>
-                    </SelectItem>
-                    <SelectItem value="collect">
-                      <div class="flex items-center gap-2">
-                        <Bookmark class="w-4 h-4" /> 收藏任务
-                      </div>
-                    </SelectItem>
-                    <SelectItem value="follow">
-                      <div class="flex items-center gap-2">
-                        <UserPlus class="w-4 h-4" /> 关注任务
-                      </div>
-                    </SelectItem>
-                    <SelectItem value="combo">
-                      <div class="flex items-center gap-2">
-                        <ListTodo class="w-4 h-4" /> 组合任务
-                      </div>
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
-            <DialogFooter>
-              <Button variant="outline" @click="showCreateDialog = false">取消</Button>
-              <Button @click="createTask">创建</Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
+              <DialogFooter>
+                <Button variant="outline" @click="showCreateDialog = false">取消</Button>
+                <Button @click="createTask">创建</Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        </div>
+      </div>
+
+      <div class="mb-3 flex items-center gap-2">
+        <Badge v-if="taskStore.isRunning" variant="default" class="text-xs">
+          {{ taskStore.runningTasks.length }} 运行中
+        </Badge>
+        <Badge v-else variant="outline" class="text-xs">空闲</Badge>
+        <span class="text-xs text-muted-foreground">并行: {{ taskStore.maxConcurrency }}</span>
       </div>
 
       <div class="mb-4">
@@ -462,28 +573,40 @@ function getTaskName(taskId: string): string {
         >
           <div class="flex items-center justify-between">
             <div class="font-medium text-sm">{{ task.name }}</div>
-            <DropdownMenu>
-              <DropdownMenuTrigger
-                :class="['p-1 rounded', selectedTaskId === task.id ? 'hover:bg-primary/80' : 'hover:bg-accent']"
-                @click.stop
-              >
-                <MoreVertical class="w-4 h-4" />
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem @click="duplicateTask">
-                  <Copy class="w-4 h-4 mr-2" />
-                  复制
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem class="text-destructive" @click="showDeleteDialog = true">
-                  <Trash2 class="w-4 h-4 mr-2" />
-                  删除
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+            <div class="flex items-center gap-1">
+              <Badge :variant="getTaskStatusBadge(task.id).variant" class="text-xs">
+                {{ getTaskStatusBadge(task.id).label }}
+              </Badge>
+              <DropdownMenu>
+                <DropdownMenuTrigger
+                  :class="['p-1 rounded', selectedTaskId === task.id ? 'hover:bg-primary/80' : 'hover:bg-accent']"
+                  @click.stop
+                >
+                  <MoreVertical class="w-4 h-4" />
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem @click="duplicateTask">
+                    <Copy class="w-4 h-4 mr-2" />
+                    复制
+                  </DropdownMenuItem>
+                  <DropdownMenuItem @click="showScheduleDialog = true">
+                    <Timer class="w-4 h-4 mr-2" />
+                    定时任务
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem class="text-destructive" @click="showDeleteDialog = true">
+                    <Trash2 class="w-4 h-4 mr-2" />
+                    删除
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
           </div>
           <div :class="['text-xs mt-1', selectedTaskId === task.id ? 'text-primary/80' : 'text-muted-foreground']">
             {{ getAccountName(task.accountId) }}
+          </div>
+          <div v-if="task.schedule?.enabled" class="text-xs mt-1 flex items-center gap-1" :class="selectedTaskId === task.id ? 'text-primary/70' : 'text-orange-500'">
+            <Timer class="w-3 h-3" /> {{ task.schedule.cron }}
           </div>
         </div>
 
@@ -506,11 +629,19 @@ function getTaskName(taskId: string): string {
           </p>
         </div>
         <div class="flex gap-2">
-          <Button @click="startTask" :disabled="taskStore.isRunning">
+          <Button v-if="currentRunningTaskInfo?.status === 'running'" variant="outline" @click="pauseCurrentTask">
+            <Pause class="w-4 h-4 mr-2" />
+            暂停
+          </Button>
+          <Button v-if="currentRunningTaskInfo?.status === 'paused'" variant="outline" @click="resumeCurrentTask">
+            <RotateCcw class="w-4 h-4 mr-2" />
+            恢复
+          </Button>
+          <Button @click="startTask" :disabled="currentRunningTaskInfo?.status === 'running'">
             <Play class="w-4 h-4 mr-2" />
             启动
           </Button>
-          <Button variant="destructive" @click="stopTask" :disabled="!taskStore.isRunning">
+          <Button variant="destructive" @click="stopTask" :disabled="!currentRunningTaskInfo">
             <Square class="w-4 h-4 mr-2" />
             停止
           </Button>
@@ -563,8 +694,115 @@ function getTaskName(taskId: string): string {
               </div>
 
               <div class="space-y-2">
-                <Label>目标评论数</Label>
+                <Label>目标操作数</Label>
                 <Input type="number" v-model.number="taskSettings.maxCount" />
+              </div>
+
+              <div class="space-y-2">
+                <Label>视频切换等待时间（毫秒）</Label>
+                <Input type="number" v-model.number="taskSettings.videoSwitchWaitMs" />
+              </div>
+
+              <div class="space-y-2">
+                <Label>连续跳过上限</Label>
+                <Input type="number" v-model.number="taskSettings.maxConsecutiveSkips" />
+                <p class="text-xs text-muted-foreground">连续跳过视频超过此数量将自动暂停任务</p>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>视频类型过滤</CardTitle>
+            </CardHeader>
+            <CardContent class="space-y-4">
+              <div class="flex items-center justify-between">
+                <div>
+                  <Label>跳过广告视频</Label>
+                  <p class="text-xs text-muted-foreground">自动跳过Feed中的广告内容</p>
+                </div>
+                <Switch v-model="taskSettings.skipAdVideo" />
+              </div>
+
+              <div class="flex items-center justify-between">
+                <div>
+                  <Label>跳过直播视频</Label>
+                  <p class="text-xs text-muted-foreground">自动跳过直播内容</p>
+                </div>
+                <Switch v-model="taskSettings.skipLiveVideo" />
+              </div>
+
+              <div class="flex items-center justify-between">
+                <div>
+                  <Label>跳过图集</Label>
+                  <p class="text-xs text-muted-foreground">自动跳过图片图集内容</p>
+                </div>
+                <Switch v-model="taskSettings.skipImageSet" />
+              </div>
+            </CardContent>
+          </Card>
+
+          <!-- 视频分类筛选 -->
+          <Card>
+            <CardHeader>
+              <div class="flex items-center justify-between">
+                <div>
+                  <CardTitle>视频分类筛选</CardTitle>
+                  <CardDescription>指定只操作特定分类的视频</CardDescription>
+                </div>
+                <Switch v-model="taskSettings.videoCategories.enabled" />
+              </div>
+            </CardHeader>
+            <CardContent v-if="taskSettings.videoCategories.enabled" class="space-y-4">
+              <div class="space-y-2">
+                <Label>筛选模式</Label>
+                <Select v-model="taskSettings.videoCategories.mode">
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="whitelist">白名单（只操作匹配的视频）</SelectItem>
+                    <SelectItem value="blacklist">黑名单（跳过匹配的视频）</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div class="space-y-2">
+                <Label>预定义分类</Label>
+                <div class="flex flex-wrap gap-2">
+                  <Badge
+                    v-for="cat in PRESET_CATEGORIES"
+                    :key="cat"
+                    :variant="taskSettings.videoCategories.categories.includes(cat) ? 'default' : 'outline'"
+                    class="cursor-pointer"
+                    @click="togglePresetCategory(cat)"
+                  >
+                    {{ cat }}
+                  </Badge>
+                </div>
+                <p class="text-xs text-muted-foreground">点击选择/取消分类</p>
+              </div>
+
+              <div class="space-y-2">
+                <Label>自定义关键词</Label>
+                <div class="flex gap-2">
+                  <Input v-model="newCustomCategoryKeyword" placeholder="输入关键词" @keyup.enter="addCustomCategoryKeyword" />
+                  <Button size="sm" @click="addCustomCategoryKeyword">添加</Button>
+                </div>
+                <div class="flex flex-wrap gap-2">
+                  <Badge v-for="(kw, index) in taskSettings.videoCategories.customKeywords" :key="index" variant="secondary">
+                    {{ kw }}
+                    <button @click="removeCustomCategoryKeyword(index)" class="ml-1 hover:text-destructive">×</button>
+                  </Badge>
+                </div>
+              </div>
+
+              <div class="flex items-center justify-between">
+                <div>
+                  <Label>启用 AI 分析</Label>
+                  <p class="text-xs text-muted-foreground">关键词匹配失败时，使用 AI 判断视频是否属于目标分类</p>
+                </div>
+                <Switch v-model="taskSettings.videoCategories.useAI" />
               </div>
             </CardContent>
           </Card>
@@ -660,15 +898,45 @@ function getTaskName(taskId: string): string {
 
           <Card>
             <CardHeader>
-              <CardTitle>AI 设置</CardTitle>
+              <CardTitle>AI 评论设置</CardTitle>
             </CardHeader>
             <CardContent class="space-y-4">
               <div class="flex items-center justify-between">
                 <Label>启用 AI 生成评论</Label>
                 <Switch v-model="taskSettings.aiCommentEnabled" />
               </div>
+
+              <div v-if="taskSettings.aiCommentEnabled" class="space-y-4">
+                <div class="space-y-2">
+                  <Label>评论风格</Label>
+                  <Select v-model="taskSettings.commentStyle">
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="mixed">混合风格</SelectItem>
+                      <SelectItem value="humorous">幽默风趣</SelectItem>
+                      <SelectItem value="serious">认真专业</SelectItem>
+                      <SelectItem value="question">提问互动</SelectItem>
+                      <SelectItem value="praise">真诚赞美</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div class="space-y-2">
+                  <Label>评论最大字数</Label>
+                  <Input type="number" v-model.number="taskSettings.commentMaxLength" />
+                </div>
+
+                <div class="space-y-2">
+                  <Label>参考热门评论条数</Label>
+                  <Input type="number" v-model.number="taskSettings.commentReferenceCount" />
+                  <p class="text-xs text-muted-foreground">AI生成评论时参考该视频的热门评论风格和话题</p>
+                </div>
+              </div>
+
               <p class="text-sm text-muted-foreground">
-                启用后，评论内容将由 AI 根据视频内容实时生成
+                启用后，评论内容将由 AI 根据视频内容与热门评论实时生成
               </p>
             </CardContent>
           </Card>
@@ -767,6 +1035,7 @@ function getTaskName(taskId: string): string {
         </TabsContent>
       </Tabs>
 
+      <!-- 实时日志 -->
       <div v-if="taskStore.isRunning" class="mt-6">
         <Card>
           <CardHeader>
@@ -791,6 +1060,7 @@ function getTaskName(taskId: string): string {
       </div>
     </div>
 
+    <!-- 删除确认 -->
     <Dialog v-model:open="showDeleteDialog">
       <DialogContent>
         <DialogHeader>
@@ -800,6 +1070,40 @@ function getTaskName(taskId: string): string {
         <DialogFooter>
           <Button variant="outline" @click="showDeleteDialog = false">取消</Button>
           <Button variant="destructive" @click="deleteTask">删除</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <!-- 定时任务配置 -->
+    <Dialog v-model:open="showScheduleDialog">
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>定时任务</DialogTitle>
+          <DialogDescription>设置 Cron 表达式定期自动执行任务</DialogDescription>
+        </DialogHeader>
+        <div class="py-4 space-y-4">
+          <div class="space-y-2">
+            <Label>Cron 表达式</Label>
+            <Input v-model="scheduleCron" placeholder="0 9 * * *" />
+            <p class="text-xs text-muted-foreground">
+              格式: 分 时 日 月 周<br>
+              示例: <code>0 9 * * *</code> 每天9点 · <code>0 9-12 * * *</code> 每天9-12点整点 · <code>*/30 9-12 * * *</code> 每天9-12点每30分钟
+            </p>
+          </div>
+          <div v-if="selectedTask?.schedule?.enabled" class="p-3 bg-accent rounded-lg">
+            <div class="text-sm font-medium">当前定时配置</div>
+            <div class="text-sm text-muted-foreground">{{ selectedTask.schedule.cron }}</div>
+            <div v-if="selectedTask.schedule.nextRunAt" class="text-xs text-muted-foreground mt-1">
+              下次执行: {{ formatTime(selectedTask.schedule.nextRunAt) }}
+            </div>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button v-if="selectedTask?.schedule?.enabled" variant="outline" @click="handleCancelSchedule">
+            取消定时
+          </Button>
+          <Button variant="outline" @click="showScheduleDialog = false">关闭</Button>
+          <Button @click="handleSchedule">设置定时</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
