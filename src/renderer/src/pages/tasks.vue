@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch, toRaw } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -49,21 +49,24 @@ import {
   AlertCircle,
   XCircle,
   History,
-  ListTodo
+  ListTodo,
+  ThumbsUp,
+  Bookmark,
+  UserPlus,
+  Eye
 } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
-import { useTaskStore } from '@/stores/task-new'
+import { useTaskStore } from '@/stores/task'
 import { useAccountStore } from '@/stores/account'
-import { useTaskStore as useRuntimeTaskStore } from '@/stores/task'
 import type { Task } from '@/../../shared/task'
 import type { FeedAcSettingsV2, FeedAcRuleGroups } from '@/../../shared/feed-ac-setting'
 import type { TaskHistoryRecord } from '@/../../shared/task-history'
+import type { TaskType } from '@/../../shared/platform'
 
 const route = useRoute()
 const router = useRouter()
 const taskStore = useTaskStore()
 const accountStore = useAccountStore()
-const runtimeTaskStore = useRuntimeTaskStore()
 
 const selectedTaskId = ref<string | null>(null)
 const isCreating = ref(false)
@@ -74,6 +77,7 @@ const taskHistory = ref<TaskHistoryRecord[]>([])
 const selectedAccountId = ref<string | null>(null)
 
 const newTaskName = ref('')
+const newTaskType = ref<TaskType>('comment')
 const templateName = ref('')
 
 const editingTask = ref<Task | null>(null)
@@ -88,6 +92,14 @@ const taskSettings = ref<FeedAcSettingsV2>({
   maxCount: 10,
   aiCommentEnabled: false
 })
+
+const selectedTaskType = ref<TaskType>('comment')
+const operationConfigs = ref([
+  { type: 'comment' as const, enabled: true, probability: 1.0, commentTexts: [''], aiEnabled: false },
+  { type: 'like' as const, enabled: false, probability: 0.3 },
+  { type: 'collect' as const, enabled: false, probability: 0.3 },
+  { type: 'follow' as const, enabled: false, probability: 0.2 }
+])
 
 const newRuleGroup = ref<Partial<FeedAcRuleGroups>>({
   type: 'manual',
@@ -136,6 +148,7 @@ watch(selectedTask, (task) => {
   if (task) {
     editingTask.value = { ...task }
     taskSettings.value = JSON.parse(JSON.stringify(task.config))
+    selectedTaskType.value = (task as any).taskType || 'comment'
   } else {
     editingTask.value = null
   }
@@ -168,11 +181,14 @@ async function createTask() {
   try {
     const task = await taskStore.createTask(
       newTaskName.value,
-      selectedAccountId.value || accountStore.accounts[0]?.id || ''
+      selectedAccountId.value || accountStore.accounts[0]?.id || '',
+      newTaskType.value
     )
     selectedTaskId.value = task.id
+    selectedTaskType.value = newTaskType.value
     showCreateDialog.value = false
     newTaskName.value = ''
+    newTaskType.value = 'comment'
     toast.success('任务创建成功')
   } catch (error) {
     toast.error('创建失败')
@@ -227,16 +243,22 @@ async function startTask() {
   }
 
   try {
-    await taskStore.updateTask(selectedTaskId.value, { config: taskSettings.value })
-    await runtimeTaskStore.start(taskSettings.value, selectedTask.value.accountId)
+    const settings = toRaw(taskSettings.value)
+    await taskStore.updateTask(selectedTaskId.value, {
+      name: editingTask.value?.name,
+      config: settings
+    })
+    
+    await taskStore.start(settings, selectedTask.value.accountId, selectedTaskType.value)
     toast.success('任务启动成功')
   } catch (error) {
-    toast.error('启动失败')
+    console.log('启动失败:' + error);
+    toast.error('启动失败:' + error)
   }
 }
 
 async function stopTask() {
-  await runtimeTaskStore.stop()
+  await taskStore.stop()
   toast.info('任务已停止')
 }
 
@@ -350,7 +372,7 @@ function getTaskName(taskId: string): string {
           <DialogContent>
             <DialogHeader>
               <DialogTitle>创建新任务</DialogTitle>
-              <DialogDescription>为任务选择一个账号和名称</DialogDescription>
+              <DialogDescription>为任务选择一个账号、类型和名称</DialogDescription>
             </DialogHeader>
             <div class="space-y-4 py-4">
               <div class="space-y-2">
@@ -366,6 +388,41 @@ function getTaskName(taskId: string): string {
                   <SelectContent>
                     <SelectItem v-for="account in accountStore.accounts" :key="account.id" :value="account.id">
                       {{ (account as any).name || '未命名账号' }}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div class="space-y-2">
+                <Label>任务类型</Label>
+                <Select v-model="newTaskType">
+                  <SelectTrigger>
+                    <SelectValue placeholder="选择任务类型" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="comment">
+                      <div class="flex items-center gap-2">
+                        <MessageSquare class="w-4 h-4" /> 评论任务
+                      </div>
+                    </SelectItem>
+                    <SelectItem value="like">
+                      <div class="flex items-center gap-2">
+                        <ThumbsUp class="w-4 h-4" /> 点赞任务
+                      </div>
+                    </SelectItem>
+                    <SelectItem value="collect">
+                      <div class="flex items-center gap-2">
+                        <Bookmark class="w-4 h-4" /> 收藏任务
+                      </div>
+                    </SelectItem>
+                    <SelectItem value="follow">
+                      <div class="flex items-center gap-2">
+                        <UserPlus class="w-4 h-4" /> 关注任务
+                      </div>
+                    </SelectItem>
+                    <SelectItem value="combo">
+                      <div class="flex items-center gap-2">
+                        <ListTodo class="w-4 h-4" /> 组合任务
+                      </div>
                     </SelectItem>
                   </SelectContent>
                 </Select>
@@ -449,11 +506,11 @@ function getTaskName(taskId: string): string {
           </p>
         </div>
         <div class="flex gap-2">
-          <Button @click="startTask" :disabled="runtimeTaskStore.isRunning">
+          <Button @click="startTask" :disabled="taskStore.isRunning">
             <Play class="w-4 h-4 mr-2" />
             启动
           </Button>
-          <Button variant="destructive" @click="stopTask" :disabled="!runtimeTaskStore.isRunning">
+          <Button variant="destructive" @click="stopTask" :disabled="!taskStore.isRunning">
             <Square class="w-4 h-4 mr-2" />
             停止
           </Button>
@@ -710,14 +767,14 @@ function getTaskName(taskId: string): string {
         </TabsContent>
       </Tabs>
 
-      <div v-if="runtimeTaskStore.isRunning" class="mt-6">
+      <div v-if="taskStore.isRunning" class="mt-6">
         <Card>
           <CardHeader>
             <CardTitle>实时日志</CardTitle>
           </CardHeader>
           <CardContent>
             <div class="h-48 overflow-auto font-mono text-sm space-y-1">
-              <div v-for="(log, index) in runtimeTaskStore.logs" :key="index">
+              <div v-for="(log, index) in taskStore.logs" :key="index">
                 {{ log.message }}
               </div>
             </div>

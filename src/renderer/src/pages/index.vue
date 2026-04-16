@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import { useTaskStore } from '@/stores/task-new'
+import { useTaskStore } from '@/stores/task'
 import { useAccountStore } from '@/stores/account'
 import type { TaskHistoryRecord } from '@/../../shared/task-history'
 import {

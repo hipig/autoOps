@@ -1,14 +1,14 @@
 import { chromium, Browser, BrowserContext, Page } from '@playwright/test'
-import { BasePlatformAdapter } from './base'
-import { PLATFORM_CONFIGS, PLATFORMS } from '../../shared/platform'
+import { BasePlatformAdapter } from '../base'
+import { PLATFORM_CONFIGS, PLATFORMS } from '../../../shared/platform'
 import type {
   LoginResult,
   VideoInfo,
   CommentListResult,
   OperationResult,
   CommentResult
-} from '../../shared/platform'
-import { sleep, random } from '../utils/common'
+} from '../../../shared/platform'
+import { sleep, random } from '../../utils/common'
 
 interface KuaishouFeedItem {
   id: string

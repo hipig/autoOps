@@ -27,6 +27,7 @@ export abstract class BasePlatformAdapter extends EventEmitter {
 
   protected page?: Page
   protected isLoggedIn = false
+  protected videoCache: Map<string, unknown> = new Map()
 
   abstract login(storageState?: unknown): Promise<LoginResult>
   abstract getVideoInfo(videoId: string): Promise<VideoInfo | null>
@@ -42,6 +43,14 @@ export abstract class BasePlatformAdapter extends EventEmitter {
   abstract isCommentSectionOpen(): Promise<boolean>
 
   abstract getActiveVideoId(): Promise<string | null>
+
+  setVideoCache(cache: Map<string, unknown>): void {
+    this.videoCache = cache
+  }
+
+  getVideoCache(): Map<string, unknown> {
+    return this.videoCache
+  }
 
   protected setPage(page: Page): void {
     this.page = page

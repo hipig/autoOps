@@ -8,7 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { useTaskStore } from '@/stores/task'
+import { useTaskStore } from '@/stores/task-new'
 import { useSettingsStore } from '@/stores/settings'
 import type { FeedAcSettingsV2, FeedAcRuleGroups } from '@/../../shared/feed-ac-setting'
 

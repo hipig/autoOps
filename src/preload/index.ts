@@ -8,11 +8,11 @@ export interface ElectronAPI {
     getAuth: () => Promise<unknown>
   }
   task: {
-    start: (config: { settings: unknown; accountId?: string }) => Promise<{ success: boolean; taskId?: string; error?: string }>
+    start: (config: { settings: unknown; accountId?: string; taskType?: string }) => Promise<{ success: boolean; taskId?: string; error?: string }>
     stop: () => Promise<{ success: boolean; error?: string }>
     status: () => Promise<{ running: boolean }>
     onProgress: (callback: (data: { message: string; timestamp: number }) => void) => void
-    onCommented: (callback: (data: { videoId: string; comment: string }) => void) => void
+    onAction: (callback: (data: { videoId: string; action: string; success: boolean }) => void) => void
   }
   'feed-ac-settings': {
     get: () => Promise<unknown>
@@ -77,7 +77,7 @@ export interface ElectronAPI {
     getAll: () => Promise<unknown[]>
     getById: (id: string) => Promise<unknown | null>
     getByAccount: (accountId: string) => Promise<unknown[]>
-    create: (data: { name: string; accountId: string; config?: unknown }) => Promise<unknown>
+    create: (data: { name: string; accountId: string; taskType?: string; config?: unknown }) => Promise<unknown>
     update: (id: string, updates: unknown) => Promise<unknown | null>
     delete: (id: string) => Promise<{ success: boolean }>
     duplicate: (id: string) => Promise<unknown | null>
@@ -104,10 +104,14 @@ const api: ElectronAPI = {
     stop: () => ipcRenderer.invoke('task:stop'),
     status: () => ipcRenderer.invoke('task:status'),
     onProgress: (callback) => {
-      ipcRenderer.on('task:progress', (_event, data) => callback(data))
+      const listener = (_event: any, data: any) => callback(data)
+      ipcRenderer.on('task:progress', listener)
+      return () => ipcRenderer.removeListener('task:progress', listener)
     },
-    onCommented: (callback) => {
-      ipcRenderer.on('task:commented', (_event, data) => callback(data))
+    onAction: (callback) => {
+      const listener = (_event: any, data: any) => callback(data)
+      ipcRenderer.on('task:action', listener)
+      return () => ipcRenderer.removeListener('task:action', listener)
     }
   },
   'feed-ac-settings': {

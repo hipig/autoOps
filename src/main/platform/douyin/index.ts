@@ -1,6 +1,6 @@
 import { chromium, Browser, BrowserContext, Page, type Response } from '@playwright/test'
-import { BasePlatformAdapter, TaskConfig, VideoRecord } from './base'
-import { PLATFORM_CONFIGS, PLATFORMS } from '../../shared/platform'
+import { BasePlatformAdapter, TaskConfig, VideoRecord } from '../base'
+import { PLATFORM_CONFIGS, PLATFORMS } from '../../../shared/platform'
 import type {
   LoginResult,
   VideoInfo,
@@ -8,9 +8,9 @@ import type {
   CommentInfo,
   OperationResult,
   CommentResult
-} from '../../shared/platform'
-import { sleep, random, generateId } from '../utils/common'
-import { store, StorageKey } from '../utils/storage'
+} from '../../../shared/platform'
+import { sleep, random, generateId } from '../../utils/common'
+import { store, StorageKey } from '../../utils/storage'
 import log from 'electron-log/main'
 
 interface DouyinFeedItem {
