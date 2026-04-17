@@ -6,6 +6,7 @@ import { sleep, generateId } from '../utils/common'
 import type { Platform, TaskType } from '../../shared/platform'
 import type { FeedAcSettingsV3, FeedAcSettingsV2 } from '../../shared/feed-ac-setting'
 import { migrateToV3 } from '../../shared/feed-ac-setting'
+import { TaskHistoryRecord } from '../../shared/task-history'
 import log from 'electron-log/main'
 
 export interface TaskStatusInfo {
@@ -223,6 +224,29 @@ export class TaskManager extends EventEmitter {
 
     // 任务停止后清理
     runner.on('stopped', () => {
+      // 构建并保存历史记录
+      try {
+        const crudTaskId = (runner as any).crudTaskId || ''
+        const taskNameFromRunner = (runner as any).taskName || '未命名任务'
+        const accountId = config.accountId || ''
+        const platform = config.platform
+            
+        const historyRecord = runner.buildHistoryRecord(
+          crudTaskId,
+          taskNameFromRunner,
+          accountId,
+          platform
+        )
+            
+        // 读取现有历史并添加新记录
+        const existingHistory = store.get(StorageKey.TASK_HISTORY) as TaskHistoryRecord[] | null || []
+        existingHistory.unshift(historyRecord)
+        store.set(StorageKey.TASK_HISTORY, existingHistory)
+        log.info(`[TaskManager] Task history saved: ${historyRecord.id}`)
+      } catch (err) {
+        log.error('[TaskManager] Failed to save task history:', err)
+      }
+          
       this.runners.delete(taskId)
       log.info(`[TaskManager] Task ${taskId} stopped, remaining: ${this.runners.size}`)
       this.emit('taskStopped', { taskId, status: runner.status })

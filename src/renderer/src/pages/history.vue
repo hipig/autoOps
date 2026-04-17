@@ -3,6 +3,7 @@ import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Badge } from '@/components/ui/badge'
 import type { TaskHistoryRecord } from '@/../../shared/task-history'
 
 const router = useRouter()
@@ -35,6 +36,21 @@ function getStatusColor(status: string): string {
   }
 }
 
+function getStatusBadge(status: string): 'default' | 'secondary' | 'destructive' | 'outline' {
+  switch (status) {
+    case 'completed':
+      return 'default'
+    case 'running':
+      return 'default'
+    case 'stopped':
+      return 'secondary'
+    case 'error':
+      return 'destructive'
+    default:
+      return 'outline'
+  }
+}
+
 async function clearHistory() {
   await window.api['task-history'].clear()
   history.value = []
@@ -60,7 +76,7 @@ async function clearHistory() {
         <Card v-for="record in history" :key="record.id">
           <CardHeader class="flex flex-row items-center justify-between">
             <div>
-              <CardTitle>任务 #{{ record.id.slice(0, 8) }}</CardTitle>
+              <CardTitle>{{ record.taskName || '未命名任务' }}</CardTitle>
               <CardDescription>
                 开始时间: {{ formatTime(record.startTime) }}
                 <span v-if="record.endTime">
@@ -69,23 +85,42 @@ async function clearHistory() {
               </CardDescription>
             </div>
             <div class="flex items-center gap-2">
-              <span :class="getStatusColor(record.status)" class="font-medium">
+              <Badge :variant="getStatusBadge(record.status)">
                 {{ record.status }}
-              </span>
-              <span class="text-muted-foreground">
-                评论: {{ record.commentCount }}
-              </span>
+              </Badge>
             </div>
           </CardHeader>
           <CardContent>
+            <div class="flex flex-wrap gap-4 mb-3">
+              <div class="flex items-center gap-1 text-sm">
+                <Badge variant="outline">{{ record.platform }}</Badge>
+              </div>
+              <div class="text-sm text-muted-foreground">
+                评论: {{ record.commentCount }}
+              </div>
+              <div class="text-sm text-muted-foreground">
+                点赞: {{ record.likeCount }}
+              </div>
+              <div class="text-sm text-muted-foreground">
+                收藏: {{ record.collectCount }}
+              </div>
+              <div class="text-sm text-muted-foreground">
+                关注: {{ record.followCount }}
+              </div>
+            </div>
             <p class="text-sm text-muted-foreground">
               处理视频: {{ record.videoRecords.length }} 个
             </p>
             <div v-if="record.videoRecords.length > 0" class="mt-2 text-sm">
               <p class="font-medium">最近处理:</p>
               <ul class="list-disc list-inside text-muted-foreground">
-                <li v-for="video in record.videoRecords.slice(-3)" :key="video.videoId">
-                  @{{ video.authorName }} - {{ video.isCommented ? '已评论' : '跳过' }}
+                <li v-for="video in record.videoRecords.slice(-5)" :key="video.videoId">
+                  @{{ video.authorName }} - 
+                  <span v-if="video.isCommented">已评论</span>
+                  <span v-else-if="video.isLiked">已点赞</span>
+                  <span v-else-if="video.isCollected">已收藏</span>
+                  <span v-else-if="video.isFollowed">已关注</span>
+                  <span v-else>跳过</span>
                   <span v-if="video.skipReason"> ({{ video.skipReason }})</span>
                 </li>
               </ul>

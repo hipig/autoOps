@@ -107,7 +107,8 @@ export function registerTaskIPC(): void {
         : config.settings as FeedAcSettingsV3
 
       const platform = config.platform || 'douyin'
-      const taskType = settings.taskType || config.taskType || 'comment'
+      // taskType 从 config.taskType 获取（这是 Task.taskType 传递过来的，是唯一来源）
+      const taskType = config.taskType || 'comment'
 
       log.info('[TaskIPC] Starting task with platform:', platform, 'taskType:', taskType, 'accountId:', config.accountId)
 

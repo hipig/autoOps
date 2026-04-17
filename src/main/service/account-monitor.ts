@@ -95,6 +95,17 @@ export async function checkAllAccountStatuses(): Promise<AccountStatusResult[]> 
           accounts[idx].expiresAt = result.expiresAt
         }
         store.set(StorageKey.ACCOUNTS, accounts)
+
+        // 通知渲染进程账号状态变化
+        const windows = BrowserWindow.getAllWindows()
+        windows.forEach((win) => {
+          win.webContents.send('account:statusChanged', {
+            accountId: account.id,
+            status: result.status,
+            expiresAt: result.expiresAt
+          })
+        })
+        log.info(`[AccountMonitor] Account ${account.id} status changed to ${result.status}, notified ${windows.length} windows`)
       }
     }
   }

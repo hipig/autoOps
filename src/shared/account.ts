@@ -1,12 +1,33 @@
 import type { Platform } from './platform'
 
+/**
+ * 浏览器存储状态类型
+ * 用于保存登录态的 cookies 和 localStorage 数据
+ */
+export interface BrowserStorageState {
+  cookies?: Array<{
+    name: string
+    value: string
+    domain?: string
+    path?: string
+    expires?: number
+    httpOnly?: boolean
+    secure?: boolean
+    sameSite?: 'Strict' | 'Lax' | 'None'
+  }>
+  origins?: Array<{
+    origin: string
+    localStorage?: Array<{ name: string; value: string }>
+  }>
+}
+
 export interface Account {
   id: string
   name: string
   platform: Platform
   platformAccountId?: string
   avatar?: string
-  storageState: unknown
+  storageState: BrowserStorageState | string | null
   cookies?: Record<string, string>
   createdAt: number
   isDefault: boolean
@@ -23,6 +44,7 @@ export interface AccountListItem {
   createdAt: number
   isDefault: boolean
   status: 'active' | 'inactive' | 'expired' | 'checking'
+  expiresAt?: number
 }
 
 export function generateAccountId(): string {

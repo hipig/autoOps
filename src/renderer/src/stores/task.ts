@@ -48,24 +48,31 @@ export const useTaskStore = defineStore('task', () => {
   }
 
   async function createTask(name: string, accountId: string, taskType: TaskType = 'comment', config?: FeedAcSettingsV3) {
-    const task = await window.api.taskCRUD.create({ name, accountId, taskType, config }) as Task
-    tasks.value.push(task)
-    return task
+    const result = await window.api.taskCRUD.create({ name, accountId, taskType, config }) as { success: boolean; data?: Task; error?: string }
+    if (!result.success || !result.data) {
+      throw new Error(result.error || '创建任务失败')
+    }
+    tasks.value.push(result.data)
+    return result.data
   }
 
   async function updateTask(id: string, updates: Partial<Task>) {
-    const updated = await window.api.taskCRUD.update(id, updates) as Task | null
-    if (updated) {
-      const index = tasks.value.findIndex((t) => t.id === id)
-      if (index !== -1) {
-        tasks.value[index] = updated
-      }
+    const result = await window.api.taskCRUD.update(id, updates) as { success: boolean; data?: Task; error?: string }
+    if (!result.success || !result.data) {
+      throw new Error(result.error || '更新任务失败')
     }
-    return updated
+    const index = tasks.value.findIndex((t) => t.id === id)
+    if (index !== -1) {
+      tasks.value[index] = result.data
+    }
+    return result.data
   }
 
   async function deleteTask(id: string) {
-    await window.api.taskCRUD.delete(id)
+    const result = await window.api.taskCRUD.delete(id) as { success: boolean; error?: string }
+    if (!result.success) {
+      throw new Error(result.error || '删除任务失败')
+    }
     tasks.value = tasks.value.filter((t) => t.id !== id)
   }
 

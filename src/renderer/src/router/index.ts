@@ -39,22 +39,30 @@ export const router = createRouter({
   routes
 })
 
-let initChecked = false
-
 router.beforeEach(async (to, _from, next) => {
+  const appStore = useAppStore()
+
+  // 如果访问 setup 页面
   if (to.name === 'setup') {
+    // 已初始化（已配置浏览器）时不允许访问 setup 页，重定向到首页
+    if (appStore.initialized) {
+      next({ name: 'home' })
+      return
+    }
     next()
     return
   }
 
-  if (to.meta.requiresInit && !initChecked) {
-    const appStore = useAppStore()
-    const initialized = await appStore.checkInitialized()
-    if (!initialized) {
-      next({ name: 'setup' })
-      return
+  // 需要初始化的页面
+  if (to.meta.requiresInit) {
+    // 使用 appStore.initialized 状态，避免重复 IPC 调用
+    if (!appStore.initialized) {
+      const isInit = await appStore.checkInitialized()
+      if (!isInit) {
+        next({ name: 'setup' })
+        return
+      }
     }
-    initChecked = true
   }
   next()
 })

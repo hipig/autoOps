@@ -14,6 +14,9 @@ export interface FeedAcRuleGroups {
   aiPrompt?: string
   relation?: 'and' | 'or'
   rules?: FeedAcRule[]
+  /**
+   * @deprecated 评论内容应该在 operations 级别定义，此字段仅用于向后兼容旧数据
+   */
   commentTexts?: string[]
   commentImagePath?: string
   commentImageType?: 'folder' | 'file'
@@ -61,13 +64,22 @@ export function getDefaultVideoCategoryConfig(): VideoCategoryConfig {
 
 export interface FeedAcSettingsV3 {
   version: 'v3'
-  taskType: 'comment' | 'like' | 'collect' | 'follow' | 'watch' | 'combo'
+  /**
+   * @deprecated 此字段已废弃，任务类型由 Task.taskType 唯一确定
+   * 保留此字段仅为向后兼容旧数据，新代码请勿使用
+   */
+  taskType?: 'comment' | 'like' | 'collect' | 'follow' | 'watch' | 'combo'
   ruleGroups: FeedAcRuleGroups[]
   blockKeywords: string[]
   authorBlockKeywords: string[]
   simulateWatchBeforeComment: boolean
   watchTimeRangeSeconds: [number, number]
   onlyCommentActiveVideo: boolean
+  /**
+   * 目标操作数：
+   * - 单类型任务（comment/like/collect/follow/watch）：该操作的执行次数
+   * - combo 组合任务：总操作次数（按 probability 分配各操作）
+   */
   maxCount: number
   aiCommentEnabled: boolean
   aiStyle?: string
@@ -115,7 +127,7 @@ export function getDefaultFeedAcSettings(): FeedAcSettingsV2 {
 export function getDefaultFeedAcSettingsV3(): FeedAcSettingsV3 {
   return {
     version: 'v3',
-    taskType: 'comment',
+    // taskType 已移除，由 Task.taskType 作为唯一来源
     ruleGroups: [],
     blockKeywords: [],
     authorBlockKeywords: [],
@@ -146,10 +158,12 @@ export function getDefaultFeedAcSettingsV3(): FeedAcSettingsV3 {
 }
 
 export function migrateToV3(settings: FeedAcSettingsV2): FeedAcSettingsV3 {
+  // 注意：taskType 由调用方在 Task 层面设置，不再存储在 config 中
+  
   return {
     ...settings,
     version: 'v3',
-    taskType: 'comment',
+    // taskType 已移除，由 Task.taskType 作为唯一来源
     operations: [
       {
         type: 'comment',

@@ -1,6 +1,7 @@
 import { ipcMain } from 'electron'
 import { store, StorageKey } from '../utils/storage'
 import type { Platform } from '../../shared/platform'
+import type { BrowserStorageState } from '../../shared/account'
 import { checkAccountLoginStatus, checkAllAccountStatuses } from '../service/account-monitor'
 
 interface Account {
@@ -9,12 +10,49 @@ interface Account {
   platform: Platform
   platformAccountId?: string
   avatar?: string
-  storageState: unknown
+  storageState: BrowserStorageState | string | null
   cookies?: Record<string, string>
   createdAt: number
   isDefault: boolean
   status: 'active' | 'inactive' | 'expired' | 'checking'
   expiresAt?: number
+}
+
+/**
+ * 验证 storageState 是否有效
+ * 检查是否包含有效的 cookies 数据
+ */
+function validateStorageState(storageState: unknown): { valid: boolean; error?: string } {
+  if (!storageState) {
+    return { valid: false, error: 'storageState 不能为空' }
+  }
+
+  let parsedState: BrowserStorageState | null = null
+
+  // 如果是字符串，尝试解析
+  if (typeof storageState === 'string') {
+    try {
+      parsedState = JSON.parse(storageState)
+    } catch {
+      return { valid: false, error: 'storageState JSON 解析失败' }
+    }
+  } else if (typeof storageState === 'object') {
+    parsedState = storageState as BrowserStorageState
+  } else {
+    return { valid: false, error: 'storageState 格式无效' }
+  }
+
+  // 检查是否包含 cookies 数组
+  if (!parsedState || !Array.isArray(parsedState.cookies)) {
+    return { valid: false, error: 'storageState 必须包含 cookies 数组' }
+  }
+
+  // 检查 cookies 是否为空
+  if (parsedState.cookies.length === 0) {
+    return { valid: false, error: 'storageState.cookies 不能为空' }
+  }
+
+  return { valid: true }
 }
 
 function getAccounts(): Account[] {
@@ -35,6 +73,12 @@ export function registerAccountIPC(): void {
   })
 
   ipcMain.handle('account:add', async (_, account: Omit<Account, 'id' | 'createdAt'>): Promise<Account> => {
+    // 验证 storageState
+    const validation = validateStorageState(account.storageState)
+    if (!validation.valid) {
+      throw new Error(validation.error || 'storageState 验证失败')
+    }
+
     const accounts = getAccounts()
     const newAccount: Account = {
       ...account,

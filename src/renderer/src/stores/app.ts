@@ -53,7 +53,16 @@ export const useAppStore = defineStore('app', () => {
   function removeTask(taskId: string) {
     delete tasks.value[taskId]
   }
-
+  
+  async function syncBrowserPath() {
+    const path = await window.api['browser-exec'].get()
+    browserPath.value = path
+    if (path) {
+      initialized.value = true
+    }
+    return path
+  }
+  
   return {
     initialized,
     browserPath,
@@ -65,6 +74,7 @@ export const useAppStore = defineStore('app', () => {
     setBrowserPath,
     setCurrentAccount,
     updateTaskStatus,
-    removeTask
+    removeTask,
+    syncBrowserPath
   }
 })

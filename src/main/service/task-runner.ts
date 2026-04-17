@@ -11,6 +11,7 @@ import { createAIService, type AIService } from '../integration/ai/factory'
 import { AISettings } from '../../shared/ai-setting'
 import { sleep, random, generateId } from '../utils/common'
 import log from 'electron-log/main'
+import { TaskHistoryRecord } from '../../shared/task-history'
 
 export interface TaskRunConfig {
   browserExecPath: string
@@ -38,6 +39,13 @@ export class TaskRunner extends EventEmitter {
   private _status: TaskRunnerStatus = 'running'
   private externalContext = false // 是否使用外部传入的context
   private _crudTaskId = '' // CRUD 任务 ID
+  private _videoRecords: VideoRecord[] = []  // 视频操作记录
+  private _startTime = 0  // 任务开始时间
+  private _accountId = ''  // 关联账号ID
+  private _commentCount = 0  // 评论成功数
+  private _likeCount = 0  // 点赞成功数
+  private _collectCount = 0  // 收藏成功数
+  private _followCount = 0  // 关注成功数
 
   get status(): TaskRunnerStatus {
     return this._status
@@ -53,6 +61,10 @@ export class TaskRunner extends EventEmitter {
 
   get crudTaskId(): string {
     return this._crudTaskId
+  }
+
+  set crudTaskId(value: string) {
+    this._crudTaskId = value
   }
 
   /**
@@ -80,7 +92,26 @@ export class TaskRunner extends EventEmitter {
     if (config.accountId) {
       const accounts = store.get(StorageKey.ACCOUNTS) as any[] || []
       const account = accounts.find((a: any) => a.id === config.accountId)
-      if (account?.storageState) {
+      
+      // 如果 accountId 存在但找不到对应账号，抛出明确错误
+      if (!account) {
+        const error = `账号不存在: ID ${config.accountId} 未找到，请检查账号配置`
+        log.error(`[TaskRunner ${this.taskId}] ${error}`)
+        this._status = 'failed'
+        this.emit('progress', { message: error, timestamp: Date.now() })
+        throw new Error(error)
+      }
+      
+      // 如果账号状态为 expired，抛出错误提示重新登录
+      if (account.status === 'expired') {
+        const error = `账号 "${account.name}" 登录态已过期，请重新登录`
+        log.error(`[TaskRunner ${this.taskId}] ${error}`)
+        this._status = 'failed'
+        this.emit('progress', { message: error, timestamp: Date.now() })
+        throw new Error(error)
+      }
+      
+      if (account.storageState) {
         try {
           storageState = JSON.parse(account.storageState)
           log.info(`Using storageState for account: ${account.name}`)
@@ -256,11 +287,21 @@ export class TaskRunner extends EventEmitter {
   private async runTask(config: TaskRunConfig): Promise<void> {
     const settings = config.settings
     const maxCount = settings.maxCount || 10
-    const taskType = settings.taskType || config.taskType
+    // taskType 从 TaskRunConfig.taskType 获取，这是唯一来源（来自 Task.taskType）
+    const taskType = config.taskType
     const maxConsecutiveSkips = settings.maxConsecutiveSkips || 20
-
+  
+    // 初始化历史记录相关变量
+    this._startTime = Date.now()
+    this._videoRecords = []
+    this._accountId = config.accountId || ''
+    this._commentCount = 0
+    this._likeCount = 0
+    this._collectCount = 0
+    this._followCount = 0
+  
     this.emit('progress', { message: `任务类型: ${this.getTaskTypeName(taskType)}, 目标: ${maxCount}`, timestamp: Date.now() })
-
+  
     let completedCount = 0
     let operationCounts: Record<string, number> = {}
     this.consecutiveSkipCount = 0
@@ -349,7 +390,7 @@ export class TaskRunner extends EventEmitter {
       }
 
       const results = await this.executeOperations(videoInfo, settings, taskType, operationCounts)
-
+      
       let anySuccess = false
       for (const result of results) {
         if (result.success) {
@@ -358,6 +399,13 @@ export class TaskRunner extends EventEmitter {
           operationCounts[result.action] = (operationCounts[result.action] || 0) + 1
           this.log('success', `${this.getActionName(result.action)}成功 (${operationCounts[result.action]}/${maxCount})`)
           this.emit('action', { videoId: videoInfo.videoId, action: result.action, success: true })
+          // 更新操作计数
+          if (result.action === 'comment') this._commentCount++
+          if (result.action === 'like') this._likeCount++
+          if (result.action === 'collect') this._collectCount++
+          if (result.action === 'follow') this._followCount++
+          // 记录成功操作的视频
+          this.recordSuccess(videoInfo, result.action, result.commentText)
         }
       }
 
@@ -653,17 +701,17 @@ export class TaskRunner extends EventEmitter {
     settings: FeedAcSettingsV3,
     taskType: TaskType,
     operationCounts: Record<string, number>
-  ): Promise<Array<{ success: boolean; action: string }>> {
-    const results: Array<{ success: boolean; action: string }> = []
+  ): Promise<Array<{ success: boolean; action: string; commentText?: string }>> {
+    const results: Array<{ success: boolean; action: string; commentText?: string }> = []
 
     if (taskType === 'combo') {
       for (const op of settings.operations) {
         if (!op.enabled) continue
         if (op.maxCount && (operationCounts[op.type] || 0) >= op.maxCount) continue
         if (Math.random() > op.probability) continue
-
+    
         const result = await this.executeSingleOperation(videoInfo, op.type, settings, op)
-        results.push({ success: result.success, action: op.type })
+        results.push({ success: result.success, action: op.type, commentText: result.commentText })
         if (settings.comboStopOnFirstSuccess && result.success) break
       }
     } else {
@@ -671,7 +719,7 @@ export class TaskRunner extends EventEmitter {
       if (operation && operation.enabled) {
         if (Math.random() <= operation.probability) {
           const result = await this.executeSingleOperation(videoInfo, taskType, settings, operation)
-          results.push({ success: result.success, action: taskType })
+          results.push({ success: result.success, action: taskType, commentText: result.commentText })
         }
       }
     }
@@ -684,9 +732,9 @@ export class TaskRunner extends EventEmitter {
     operationType: string,
     settings: FeedAcSettingsV3,
     operation: FeedAcSettingsV3['operations'][0]
-  ): Promise<{ success: boolean; error?: string }> {
+  ): Promise<{ success: boolean; error?: string; commentText?: string }> {
     if (!this.adapter) return { success: false, error: 'Adapter not initialized' }
-
+  
     switch (operationType) {
       case 'comment':
         return this.executeComment(videoInfo, settings, operation)
@@ -705,12 +753,12 @@ export class TaskRunner extends EventEmitter {
     videoInfo: VideoInfo,
     settings: FeedAcSettingsV3,
     operation: FeedAcSettingsV3['operations'][0]
-  ): Promise<{ success: boolean; error?: string }> {
+  ): Promise<{ success: boolean; error?: string; commentText?: string }> {
     if (!this.adapter) return { success: false, error: 'Adapter not initialized' }
-
+  
     await this.adapter.openCommentSection()
     await sleep(random(2000, 4000))
-
+  
     if (settings.onlyCommentActiveVideo && this.adapter) {
       const commentData = await this.adapter.getCommentList(videoInfo.videoId)
       if (commentData && commentData.comments.length > 0) {
@@ -723,10 +771,10 @@ export class TaskRunner extends EventEmitter {
         }
       }
     }
-
+  
     let commentText = ''
     const useAI = (operation.aiEnabled || settings.aiCommentEnabled) && this.aiService
-
+  
     if (useAI) {
       try {
         let topComments: Array<{ content: string; likeCount: number }> = []
@@ -738,7 +786,7 @@ export class TaskRunner extends EventEmitter {
             this.log('info', `获取到 ${topComments.length} 条热门评论`)
           }
         }
-
+  
         const result = await this.aiService!.generateComment(
           {
             author: videoInfo.author.nickname,
@@ -761,11 +809,11 @@ export class TaskRunner extends EventEmitter {
     } else {
       commentText = this.getRandomComment(operation.commentTexts || [])
     }
-
+  
     const result = await this.adapter.comment(videoInfo.videoId, commentText)
     if (this.adapter) await this.adapter.closeCommentSection()
-
-    return { success: result.success, error: result.error }
+  
+    return { success: result.success, error: result.error, commentText: result.success ? commentText : undefined }
   }
 
   private async executeLike(videoId: string): Promise<{ success: boolean; error?: string }> {
@@ -804,10 +852,75 @@ export class TaskRunner extends EventEmitter {
       skipReason: reason,
       timestamp: Date.now()
     }
+    this._videoRecords.push(record)
     this.emit('progress', {
       message: `记录视频: ${record.authorName} - 跳过: ${reason}`,
       timestamp: Date.now()
     })
+  }
+  
+  /**
+   * 记录成功操作的视频
+   */
+  private recordSuccess(videoInfo: VideoInfo, action: string, commentText?: string): void {
+    // 查找是否已有该视频的记录（可能之前记录过跳过或其他操作）
+    const existingIndex = this._videoRecords.findIndex(r => r.videoId === videoInfo.videoId)
+      
+    if (existingIndex >= 0) {
+      // 更新现有记录
+      const record = this._videoRecords[existingIndex]
+      if (action === 'comment') {
+        record.isCommented = true
+        record.commentText = commentText
+      } else if (action === 'like') {
+        record.isLiked = true
+      } else if (action === 'collect') {
+        record.isCollected = true
+      } else if (action === 'follow') {
+        record.isFollowed = true
+      }
+      record.skipReason = undefined  // 成功操作后移除跳过原因
+    } else {
+      // 创建新记录
+      const record: VideoRecord = {
+        videoId: videoInfo.videoId,
+        authorName: videoInfo.author.nickname,
+        authorId: videoInfo.author.userId,
+        videoDesc: videoInfo.description,
+        videoTags: videoInfo.tags,
+        shareUrl: videoInfo.shareUrl,
+        watchDuration: Date.now() - this.currentVideoStartTime,
+        isLiked: action === 'like',
+        isCollected: action === 'collect',
+        isFollowed: action === 'follow',
+        isCommented: action === 'comment',
+        commentText: action === 'comment' ? commentText : undefined,
+        timestamp: Date.now()
+      }
+      this._videoRecords.push(record)
+    }
+  }
+  
+  /**
+   * 构建历史记录对象
+   */
+  buildHistoryRecord(taskId: string, taskName: string, accountId: string, platform: string): TaskHistoryRecord {
+    return {
+      id: this.taskId,
+      taskId,
+      taskName,
+      accountId,
+      platform,
+      startTime: this._startTime,
+      endTime: Date.now(),
+      status: this._status === 'failed' ? 'error' : (this._status === 'running' || this._status === 'paused' ? 'stopped' : this._status),
+      commentCount: this._commentCount,
+      likeCount: this._likeCount,
+      collectCount: this._collectCount,
+      followCount: this._followCount,
+      videoRecords: [...this._videoRecords],
+      settings: {}
+    }
   }
 
   private getTaskTypeName(taskType: TaskType): string {

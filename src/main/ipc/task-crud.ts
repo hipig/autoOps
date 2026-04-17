@@ -27,38 +27,54 @@ export function registerTaskIPC(): void {
   })
 
   ipcMain.handle('task:create', async (_event, data: { name: string; accountId: string; platform?: Platform; taskType?: TaskType; config?: Task['config'] }) => {
-    const tasks = store.get(StorageKey.TASKS) as Task[] || []
-    const newTask: Task = {
-      id: generateTaskId(),
-      name: data.name,
-      accountId: data.accountId,
-      platform: data.platform || 'douyin',
-      taskType: data.taskType || 'comment',
-      config: data.config || getDefaultFeedAcSettingsV3(),
-      createdAt: Date.now(),
-      updatedAt: Date.now()
+    try {
+      const tasks = store.get(StorageKey.TASKS) as Task[] || []
+      const newTask: Task = {
+        id: generateTaskId(),
+        name: data.name,
+        accountId: data.accountId,
+        platform: data.platform || 'douyin',
+        taskType: data.taskType || 'comment',
+        config: data.config || getDefaultFeedAcSettingsV3(),
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      }
+      tasks.push(newTask)
+      store.set(StorageKey.TASKS, tasks)
+      return { success: true, data: newTask }
+    } catch (error) {
+      return { success: false, error: String(error) }
     }
-    tasks.push(newTask)
-    store.set(StorageKey.TASKS, tasks)
-    return newTask
   })
 
   ipcMain.handle('task:update', async (_event, id: string, updates: Partial<Task>) => {
-    const tasks = store.get(StorageKey.TASKS) as Task[] || []
-    const index = tasks.findIndex((t) => t.id === id)
-    if (index !== -1) {
-      tasks[index] = { ...tasks[index], ...updates, updatedAt: Date.now() }
-      store.set(StorageKey.TASKS, tasks)
-      return tasks[index]
+    try {
+      const tasks = store.get(StorageKey.TASKS) as Task[] || []
+      const index = tasks.findIndex((t) => t.id === id)
+      if (index !== -1) {
+        tasks[index] = { ...tasks[index], ...updates, updatedAt: Date.now() }
+        store.set(StorageKey.TASKS, tasks)
+        return { success: true, data: tasks[index] }
+      }
+      return { success: false, error: '任务不存在' }
+    } catch (error) {
+      return { success: false, error: String(error) }
     }
-    return null
   })
 
   ipcMain.handle('task:delete', async (_event, id: string) => {
-    const tasks = store.get(StorageKey.TASKS) as Task[] || []
-    const filtered = tasks.filter((t) => t.id !== id)
-    store.set(StorageKey.TASKS, filtered)
-    return { success: true }
+    try {
+      const tasks = store.get(StorageKey.TASKS) as Task[] || []
+      const index = tasks.findIndex((t) => t.id === id)
+      if (index === -1) {
+        return { success: false, error: '任务不存在' }
+      }
+      const filtered = tasks.filter((t) => t.id !== id)
+      store.set(StorageKey.TASKS, filtered)
+      return { success: true }
+    } catch (error) {
+      return { success: false, error: String(error) }
+    }
   })
 
   ipcMain.handle('task:duplicate', async (_event, id: string) => {

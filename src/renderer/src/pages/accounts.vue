@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, onUnmounted } from 'vue'
 import { useAccountStore } from '@/stores/account'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -40,6 +40,14 @@ const isLoggingIn = ref(false)
 const isCheckingStatus = ref(false)
 const selectedPlatform = ref<Platform>('douyin')
 
+// 平台登录支持状态
+const PLATFORM_LOGIN_SUPPORT: Record<Platform, boolean> = {
+  douyin: true,
+  kuaishou: false,
+  xiaohongshu: false,
+  wechat: false
+}
+
 const PLATFORM_LABELS: Record<string, string> = {
   douyin: '抖音',
   kuaishou: '快手',
@@ -57,8 +65,20 @@ const platformList = computed(() => {
   return platforms
 })
 
+// 监听账号状态变化
+let cleanupStatusListener: (() => void) | null = null
+
 onMounted(async () => {
   await accountStore.loadAccounts()
+  // 初始化账号状态变化监听
+  cleanupStatusListener = accountStore.initStatusChangeListener()
+})
+
+onUnmounted(() => {
+  // 清理监听器
+  if (cleanupStatusListener) {
+    cleanupStatusListener()
+  }
 })
 
 const getStatusIcon = (status: string) => {
@@ -108,11 +128,28 @@ const handleSetDefault = async (id: string) => {
 }
 
 const handleLogin = async () => {
+  // 检查平台登录是否支持
+  if (!PLATFORM_LOGIN_SUPPORT[selectedPlatform.value]) {
+    toast.info(`${PLATFORM_LABELS[selectedPlatform.value]} 登录即将支持，敬请期待`)
+    return
+  }
+
   isLoggingIn.value = true
-  toast.info('正在打开浏览器，请在新窗口中登录抖音...')
+  toast.info(`正在打开浏览器，请在新窗口中登录${PLATFORM_LABELS[selectedPlatform.value]}...`)
 
   try {
-    const result = await window.api.login.douyin()
+    let result
+    
+    // 根据选择的平台调用对应的登录方法
+    switch (selectedPlatform.value) {
+      case 'douyin':
+        result = await window.api.login.douyin()
+        break
+      default:
+        toast.error(`${PLATFORM_LABELS[selectedPlatform.value]} 登录功能尚未实现`)
+        isLoggingIn.value = false
+        return
+    }
 
     if (!result.success) {
       toast.error(result.error || '登录失败')
@@ -120,8 +157,9 @@ const handleLogin = async () => {
     }
 
     const accountData = {
-      name: result.userInfo?.nickname || '抖音用户',
-      platform: 'douyin' as Platform,
+      name: result.userInfo?.nickname || `${PLATFORM_LABELS[selectedPlatform.value]}用户`,
+      platform: selectedPlatform.value,
+      platformAccountId: result.userInfo?.uniqueId, // 提取 platformAccountId
       avatar: result.userInfo?.avatar,
       storageState: result.storageState,
       isDefault: accountStore.accounts.length === 0,
@@ -173,11 +211,24 @@ const handleCheckAllStatuses = async () => {
           <Shield v-else class="w-4 h-4 mr-2" />
           {{ isCheckingStatus ? '检查中...' : '检查状态' }}
         </Button>
-        <Button @click="handleLogin" :disabled="isLoggingIn">
-          <Loader2 v-if="isLoggingIn" class="w-4 h-4 mr-2 animate-spin" />
-          <LogIn v-else class="w-4 h-4 mr-2" />
-          {{ isLoggingIn ? '登录中...' : '添加账号' }}
-        </Button>
+        <div class="flex gap-2">
+          <Select v-model="selectedPlatform">
+            <SelectTrigger class="w-[140px]">
+              <SelectValue placeholder="选择平台" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="douyin">抖音</SelectItem>
+              <SelectItem value="kuaishou" disabled>快手（即将支持）</SelectItem>
+              <SelectItem value="xiaohongshu" disabled>小红书（即将支持）</SelectItem>
+              <SelectItem value="wechat" disabled>微信视频号（即将支持）</SelectItem>
+            </SelectContent>
+          </Select>
+          <Button @click="handleLogin" :disabled="isLoggingIn">
+            <Loader2 v-if="isLoggingIn" class="w-4 h-4 mr-2 animate-spin" />
+            <LogIn v-else class="w-4 h-4 mr-2" />
+            {{ isLoggingIn ? '登录中...' : '添加账号' }}
+          </Button>
+        </div>
       </div>
     </div>
 

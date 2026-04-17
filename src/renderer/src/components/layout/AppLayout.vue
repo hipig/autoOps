@@ -3,7 +3,6 @@ import { RouterView } from 'vue-router'
 import {
   SidebarProvider,
   SidebarInset,
-  SidebarTrigger
 } from '@/components/ui/sidebar'
 import AppSidebar from './Sidebar.vue'
 import StatusBar from './StatusBar.vue'

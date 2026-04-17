@@ -14,6 +14,10 @@ export interface Task {
   name: string
   accountId: string
   platform: Platform
+  /**
+   * 任务类型 - 这是任务类型的唯一真实来源
+   * 不要从 config.taskType 读取，该字段已废弃
+   */
   taskType: TaskType
   config: FeedAcSettingsV3
   schedule?: TaskSchedule

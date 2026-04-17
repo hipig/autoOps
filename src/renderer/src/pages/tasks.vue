@@ -63,7 +63,7 @@ import { toast } from 'vue-sonner'
 import { useTaskStore } from '@/stores/task'
 import { useAccountStore } from '@/stores/account'
 import type { Task } from '@/../../shared/task'
-import type { FeedAcSettingsV3, FeedAcRuleGroups, CommentStyle, CategoryMode, VideoCategoryConfig } from '@/../../shared/feed-ac-setting'
+import type { FeedAcSettingsV3, FeedAcSettingsV2, FeedAcRuleGroups, CommentStyle, CategoryMode, VideoCategoryConfig } from '@/../../shared/feed-ac-setting'
 import { getDefaultFeedAcSettingsV3, migrateToV3, PRESET_CATEGORIES } from '@/../../shared/feed-ac-setting'
 import type { TaskHistoryRecord } from '@/../../shared/task-history'
 import type { TaskType } from '@/../../shared/platform'
@@ -123,7 +123,7 @@ const selectedTask = computed(() => {
 
 const selectedTaskHistory = computed(() => {
   if (!selectedTaskId.value) return []
-  return taskHistory.value.filter(h => h.id.includes(selectedTaskId.value!) || h.id.startsWith(selectedTaskId.value!.split('-').pop() || ''))
+  return taskHistory.value.filter(h => h.taskId === selectedTaskId.value)
 })
 
 const currentRunningTaskInfo = computed(() => {
@@ -155,9 +155,10 @@ onMounted(async () => {
 watch(selectedTask, (task) => {
   if (task) {
     editingTask.value = { ...task }
-    const config = task.config as any
+    // 兼容旧数据：config 可能是 v2 或 v3 格式
+    const config = task.config as FeedAcSettingsV3 | FeedAcSettingsV2
     if (config.version === 'v2') {
-      taskSettings.value = migrateToV3(config)
+      taskSettings.value = migrateToV3(config as FeedAcSettingsV2)
     } else {
       taskSettings.value = { ...getDefaultFeedAcSettingsV3(), ...config }
       // 确保 videoCategories 存在
@@ -165,7 +166,8 @@ watch(selectedTask, (task) => {
         taskSettings.value.videoCategories = { enabled: false, mode: 'whitelist', categories: [], customKeywords: [], useAI: false }
       }
     }
-    selectedTaskType.value = (task as any).taskType || 'comment'
+    // 从 Task.taskType 读取任务类型，这是唯一来源
+    selectedTaskType.value = task.taskType
   } else {
     editingTask.value = null
   }
@@ -197,8 +199,8 @@ async function createTask() {
     newTaskName.value = ''
     newTaskType.value = 'comment'
     toast.success('任务创建成功')
-  } catch (error) {
-    toast.error('创建失败')
+  } catch (error: any) {
+    toast.error('创建失败: ' + (error?.message || error))
   }
 }
 
@@ -206,14 +208,15 @@ async function saveTask() {
   if (!selectedTaskId.value) return
 
   try {
+    const name = toRaw(editingTask.value?.name)
     const rawSettings = JSON.parse(JSON.stringify(toRaw(taskSettings.value)))
     await taskStore.updateTask(selectedTaskId.value, {
-      name: editingTask.value?.name,
+      name: name,
       config: rawSettings
     })
     toast.success('保存成功')
-  } catch (error) {
-    toast.error('保存失败')
+  } catch (error: any) {
+    toast.error('保存失败: ' + (error?.message || error))
   }
 }
 
@@ -225,8 +228,8 @@ async function deleteTask() {
     selectedTaskId.value = taskStore.tasks[0]?.id || null
     showDeleteDialog.value = false
     toast.success('删除成功')
-  } catch (error) {
-    toast.error('删除失败')
+  } catch (error: any) {
+    toast.error('删除失败: ' + (error?.message || error))
   }
 }
 
@@ -239,8 +242,8 @@ async function duplicateTask() {
       selectedTaskId.value = newTask.id
       toast.success('复制成功')
     }
-  } catch (error) {
-    toast.error('复制失败')
+  } catch (error: any) {
+    toast.error('复制失败: ' + (error?.message || error))
   }
 }
 
@@ -253,15 +256,22 @@ async function startTask() {
   try {
     const settings = toRaw(taskSettings.value)
     const rawSettings = JSON.parse(JSON.stringify(settings))
-    await taskStore.updateTask(selectedTaskId.value, {
-      name: editingTask.value?.name,
-      config: rawSettings
-    })
+    
+    // 先保存配置，失败则阻止启动
+    try {
+      await taskStore.updateTask(selectedTaskId.value, {
+        name: editingTask.value?.name,
+        config: rawSettings
+      })
+    } catch (saveError: any) {
+      toast.error('配置保存失败，无法启动任务: ' + (saveError?.message || saveError))
+      return
+    }
     
     await taskStore.start(rawSettings, selectedTask.value.accountId, selectedTaskType.value, editingTask.value?.name, selectedTaskId.value)
     toast.success('任务启动成功')
-  } catch (error) {
-    toast.error('启动失败:' + error)
+  } catch (error: any) {
+    toast.error('启动失败: ' + (error?.message || error))
   }
 }
 

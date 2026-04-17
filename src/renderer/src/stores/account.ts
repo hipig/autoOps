@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref, computed, onUnmounted } from 'vue'
 import type { Platform } from '../../../shared/platform'
+import type { BrowserStorageState } from '../../../shared/account'
 
 export interface Account {
   id: string
@@ -8,7 +9,7 @@ export interface Account {
   platform: Platform
   platformAccountId?: string
   avatar?: string
-  storageState: unknown
+  storageState: BrowserStorageState | string | null
   cookies?: Record<string, string>
   createdAt: number
   isDefault: boolean
@@ -108,6 +109,23 @@ export const useAccountStore = defineStore('account', () => {
     return accounts.value.filter(a => a.platform === platform)
   }
 
+  /**
+   * 初始化账号状态变化监听
+   * 返回清除函数，应在组件卸载时调用
+   */
+  function initStatusChangeListener(): () => void {
+    const cleanup = window.api.account.onStatusChanged((data) => {
+      const account = accounts.value.find(a => a.id === data.accountId)
+      if (account) {
+        account.status = data.status as Account['status']
+        if (data.expiresAt) {
+          account.expiresAt = data.expiresAt
+        }
+      }
+    })
+    return cleanup
+  }
+
   return {
     accounts,
     currentAccountId,
@@ -122,6 +140,7 @@ export const useAccountStore = defineStore('account', () => {
     setCurrentAccount,
     checkAccountStatus,
     checkAllAccountStatuses,
-    getAccountsByPlatform
+    getAccountsByPlatform,
+    initStatusChangeListener
   }
 })

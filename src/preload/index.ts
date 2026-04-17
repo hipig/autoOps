@@ -74,6 +74,7 @@ export interface ElectronAPI {
     getByPlatform: (platform: string) => Promise<unknown[]>
     getActiveAccounts: () => Promise<unknown[]>
     checkStatus: (id: string) => Promise<{ status: string; expiresAt?: number }>
+    onStatusChanged: (callback: (data: { accountId: string; status: string; expiresAt?: number }) => void) => () => void
   }
   login: {
     douyin: () => Promise<{ success: boolean; storageState?: string; error?: string; userInfo?: { nickname: string; avatar?: string; uniqueId?: string } }>
@@ -190,7 +191,8 @@ const api: ElectronAPI = {
     getById: (id) => ipcRenderer.invoke('account:getById', id),
     getByPlatform: (platform) => ipcRenderer.invoke('account:getByPlatform', platform),
     getActiveAccounts: () => ipcRenderer.invoke('account:getActiveAccounts'),
-    checkStatus: (id) => ipcRenderer.invoke('account:check-status', id)
+    checkStatus: (id) => ipcRenderer.invoke('account:check-status', id),
+    onStatusChanged: (callback) => createIPCListener('account:statusChanged', callback)
   },
   login: {
     douyin: () => ipcRenderer.invoke('login:douyin')
