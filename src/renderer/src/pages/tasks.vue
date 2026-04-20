@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch, toRaw } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, toRaw, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -63,7 +63,7 @@ import { toast } from 'vue-sonner'
 import { useTaskStore } from '@/stores/task'
 import { useAccountStore } from '@/stores/account'
 import type { Task } from '@/../../shared/task'
-import type { FeedAcSettingsV3, FeedAcSettingsV2, FeedAcRuleGroups, CommentStyle, CategoryMode, VideoCategoryConfig } from '@/../../shared/feed-ac-setting'
+import type { FeedAcSettingsV3, FeedAcRuleGroups, CommentStyle, CategoryMode, VideoCategoryConfig } from '@/../../shared/feed-ac-setting'
 import { getDefaultFeedAcSettingsV3, migrateToV3, PRESET_CATEGORIES } from '@/../../shared/feed-ac-setting'
 import type { TaskHistoryRecord } from '@/../../shared/task-history'
 import type { TaskType } from '@/../../shared/platform'
@@ -80,7 +80,9 @@ const showTemplateDialog = ref(false)
 const showDeleteDialog = ref(false)
 const showScheduleDialog = ref(false)
 const showConcurrencyDialog = ref(false)
+const showHistoryDetailDialog = ref(false)
 const taskHistory = ref<TaskHistoryRecord[]>([])
+const selectedHistoryRecord = ref<TaskHistoryRecord | null>(null)
 const selectedAccountId = ref<string | null>(null)
 
 const newTaskName = ref('')
@@ -110,6 +112,7 @@ const newAuthorBlockKeyword = ref('')
 const newCustomCategoryKeyword = ref('')
 const scheduleCron = ref('')
 const concurrencyInput = ref(3)
+const logContainer = ref<HTMLElement | null>(null)
 
 const filteredTasks = computed(() => {
   if (!selectedAccountId.value || selectedAccountId.value === '__all__') return taskStore.tasks
@@ -123,6 +126,7 @@ const selectedTask = computed(() => {
 
 const selectedTaskHistory = computed(() => {
   if (!selectedTaskId.value) return []
+  // 使用 taskId 字段匹配（taskId 是 CRUD 任务的 ID）
   return taskHistory.value.filter(h => h.taskId === selectedTaskId.value)
 })
 
@@ -150,31 +154,62 @@ onMounted(async () => {
   if (taskStore.tasks.length > 0 && !selectedTaskId.value) {
     selectedTaskId.value = taskStore.tasks[0].id
   }
+
+  // 监听历史记录实时更新事件
+  const unsubscribeHistoryUpdate = window.api.task.onHistoryUpdate((data: any) => {
+    // 实时刷新历史记录
+    window.api['task-history'].getAll().then((history) => {
+      taskHistory.value = history as TaskHistoryRecord[]
+    })
+  })
+
+  onUnmounted(() => {
+    unsubscribeHistoryUpdate()
+  })
 })
 
 watch(selectedTask, (task) => {
   if (task) {
     editingTask.value = { ...task }
-    // 兼容旧数据：config 可能是 v2 或 v3 格式
-    const config = task.config as FeedAcSettingsV3 | FeedAcSettingsV2
+    const config = task.config as any
     if (config.version === 'v2') {
-      taskSettings.value = migrateToV3(config as FeedAcSettingsV2)
+      taskSettings.value = migrateToV3(config)
     } else {
       taskSettings.value = { ...getDefaultFeedAcSettingsV3(), ...config }
-      // 确保 videoCategories 存在
+      // 确保 videoCategories 存在并有完整字段
       if (!taskSettings.value.videoCategories) {
-        taskSettings.value.videoCategories = { enabled: false, mode: 'whitelist', categories: [], customKeywords: [], useAI: false }
+        taskSettings.value.videoCategories = {
+          enabled: false,
+          mode: 'whitelist',
+          categories: [],
+          customKeywords: [],
+          useAI: false,
+          prioritizeAI: true,
+          aiPrompt: '判断这个视频是否属于目标分类。请综合考虑视频描述、标签和热门评论的内容。'
+        }
+      } else {
+        // 确保新字段存在
+        if (taskSettings.value.videoCategories.prioritizeAI === undefined) {
+          taskSettings.value.videoCategories.prioritizeAI = true
+        }
+        if (!taskSettings.value.videoCategories.aiPrompt) {
+          taskSettings.value.videoCategories.aiPrompt = '判断这个视频是否属于目标分类。请综合考虑视频描述、标签和热门评论的内容。'
+        }
       }
     }
-    // 从 Task.taskType 读取任务类型，这是唯一来源
-    selectedTaskType.value = task.taskType
+    selectedTaskType.value = (task as any).taskType || 'comment'
   } else {
     editingTask.value = null
   }
 })
 
-watch(selectedTaskId, () => {
-  taskSettings.value = getDefaultFeedAcSettingsV3()
+// 监听日志变化，自动滚动到底部
+watch(() => taskStore.logs.length, () => {
+  nextTick(() => {
+    if (logContainer.value) {
+      logContainer.value.scrollTop = logContainer.value.scrollHeight
+    }
+  })
 })
 
 async function createTask() {
@@ -199,8 +234,8 @@ async function createTask() {
     newTaskName.value = ''
     newTaskType.value = 'comment'
     toast.success('任务创建成功')
-  } catch (error: any) {
-    toast.error('创建失败: ' + (error?.message || error))
+  } catch (error) {
+    toast.error('创建失败')
   }
 }
 
@@ -208,15 +243,14 @@ async function saveTask() {
   if (!selectedTaskId.value) return
 
   try {
-    const name = toRaw(editingTask.value?.name)
     const rawSettings = JSON.parse(JSON.stringify(toRaw(taskSettings.value)))
     await taskStore.updateTask(selectedTaskId.value, {
-      name: name,
+      name: editingTask.value?.name,
       config: rawSettings
     })
     toast.success('保存成功')
-  } catch (error: any) {
-    toast.error('保存失败: ' + (error?.message || error))
+  } catch (error) {
+    toast.error('保存失败')
   }
 }
 
@@ -228,8 +262,8 @@ async function deleteTask() {
     selectedTaskId.value = taskStore.tasks[0]?.id || null
     showDeleteDialog.value = false
     toast.success('删除成功')
-  } catch (error: any) {
-    toast.error('删除失败: ' + (error?.message || error))
+  } catch (error) {
+    toast.error('删除失败')
   }
 }
 
@@ -242,8 +276,8 @@ async function duplicateTask() {
       selectedTaskId.value = newTask.id
       toast.success('复制成功')
     }
-  } catch (error: any) {
-    toast.error('复制失败: ' + (error?.message || error))
+  } catch (error) {
+    toast.error('复制失败')
   }
 }
 
@@ -256,22 +290,15 @@ async function startTask() {
   try {
     const settings = toRaw(taskSettings.value)
     const rawSettings = JSON.parse(JSON.stringify(settings))
-    
-    // 先保存配置，失败则阻止启动
-    try {
-      await taskStore.updateTask(selectedTaskId.value, {
-        name: editingTask.value?.name,
-        config: rawSettings
-      })
-    } catch (saveError: any) {
-      toast.error('配置保存失败，无法启动任务: ' + (saveError?.message || saveError))
-      return
-    }
+    await taskStore.updateTask(selectedTaskId.value, {
+      name: editingTask.value?.name,
+      config: rawSettings
+    })
     
     await taskStore.start(rawSettings, selectedTask.value.accountId, selectedTaskType.value, editingTask.value?.name, selectedTaskId.value)
     toast.success('任务启动成功')
-  } catch (error: any) {
-    toast.error('启动失败: ' + (error?.message || error))
+  } catch (error) {
+    toast.error('启动失败:' + error)
   }
 }
 
@@ -437,7 +464,47 @@ function getTaskStatusBadge(crudTaskId: string): { label: string; variant: 'defa
     if (running.status === 'paused') return { label: '暂停', variant: 'secondary' }
     return { label: '运行中', variant: 'default' }
   }
-  return { label: '就绪', variant: 'outline' }
+  return { label: '就绪', variant: 'default' }
+}
+
+function getStatusText(status: string): string {
+  const statusMap: Record<string, string> = {
+    running: '运行中',
+    completed: '已完成',
+    stopped: '已停止',
+    paused: '已暂停',
+    error: '错误',
+    failed: '失败'
+  }
+  return statusMap[status] || status
+}
+
+function getStatusBadge(status: string): 'default' | 'secondary' | 'destructive' | 'outline' {
+  switch (status) {
+    case 'running': return 'default'
+    case 'completed': return 'outline'
+    case 'paused': return 'secondary'
+    case 'stopped': return 'secondary'
+    case 'error': case 'failed': return 'destructive'
+    default: return 'outline'
+  }
+}
+
+async function clearTaskHistory() {
+  if (!selectedTaskId.value) return
+
+  try {
+    await window.api['task-history'].deleteByTaskId(selectedTaskId.value)
+    taskHistory.value = await window.api['task-history'].getAll() as TaskHistoryRecord[]
+    toast.success('历史记录已清空')
+  } catch (error) {
+    toast.error('清空失败')
+  }
+}
+
+function viewHistoryDetail(record: TaskHistoryRecord) {
+  selectedHistoryRecord.value = record
+  showHistoryDetailDialog.value = true
 }
 
 function getAccountName(accountId: string): string {
@@ -697,12 +764,47 @@ function getTaskName(taskId: string): string {
               </div>
 
               <div class="space-y-2">
+                <Label>观看时长模式</Label>
+                <Select v-model="taskSettings.watchTimeMode">
+                  <SelectTrigger>
+                    <SelectValue placeholder="选择模式" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="fixed">固定时长</SelectItem>
+                    <SelectItem value="percentage">视频百分比</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div v-if="taskSettings.watchTimeMode === 'fixed'" class="space-y-2">
                 <Label>观看时长范围（秒）</Label>
                 <div class="flex gap-2">
                   <Input type="number" v-model.number="taskSettings.watchTimeRangeSeconds[0]" />
                   <span class="self-center">-</span>
                   <Input type="number" v-model.number="taskSettings.watchTimeRangeSeconds[1]" />
                 </div>
+              </div>
+
+              <div v-if="taskSettings.watchTimeMode === 'percentage'" class="space-y-2">
+                <Label>观看视频百分比范围（%）</Label>
+                <div class="flex gap-2">
+                  <Input
+                    type="number"
+                    :model-value="(taskSettings.watchTimePercentageRange?.[0] || 0.2) * 100"
+                    @update:model-value="taskSettings.watchTimePercentageRange = [($event as number) / 100, taskSettings.watchTimePercentageRange?.[1] || 0.5]"
+                    :min="1"
+                    :max="100"
+                  />
+                  <span class="self-center">-</span>
+                  <Input
+                    type="number"
+                    :model-value="(taskSettings.watchTimePercentageRange?.[1] || 0.5) * 100"
+                    @update:model-value="taskSettings.watchTimePercentageRange = [taskSettings.watchTimePercentageRange?.[0] || 0.2, ($event as number) / 100]"
+                    :min="1"
+                    :max="100"
+                  />
+                </div>
+                <p class="text-sm text-muted-foreground">根据视频实际时长的百分比来观看，例如 20%-50% 表示观看视频时长的 20% 到 50%</p>
               </div>
 
               <div class="flex items-center justify-between">
@@ -716,8 +818,13 @@ function getTaskName(taskId: string): string {
               </div>
 
               <div class="space-y-2">
-                <Label>视频切换等待时间（毫秒）</Label>
-                <Input type="number" v-model.number="taskSettings.videoSwitchWaitMs" />
+                <Label>视频切换等待时间范围（秒）</Label>
+                <div class="flex gap-2">
+                  <Input type="number" v-model.number="taskSettings.videoSwitchWaitRange[0]" :min="1" />
+                  <span class="self-center">-</span>
+                  <Input type="number" v-model.number="taskSettings.videoSwitchWaitRange[1]" :min="1" />
+                </div>
+                <p class="text-sm text-muted-foreground">切换到下一个视频后的随机等待时间，避免固定模式被检测</p>
               </div>
 
               <div class="space-y-2">
@@ -817,9 +924,30 @@ function getTaskName(taskId: string): string {
               <div class="flex items-center justify-between">
                 <div>
                   <Label>启用 AI 分析</Label>
-                  <p class="text-xs text-muted-foreground">关键词匹配失败时，使用 AI 判断视频是否属于目标分类</p>
+                  <p class="text-xs text-muted-foreground">使用 AI 判断视频是否属于目标分类</p>
                 </div>
                 <Switch v-model="taskSettings.videoCategories.useAI" />
+              </div>
+
+              <div v-if="taskSettings.videoCategories.useAI" class="space-y-2">
+                <div class="flex items-center justify-between">
+                  <div>
+                    <Label>优先使用 AI 判断</Label>
+                    <p class="text-xs text-muted-foreground">优先使用 AI 而非关键词匹配（推荐）</p>
+                  </div>
+                  <Switch v-model="taskSettings.videoCategories.prioritizeAI" />
+                </div>
+
+                <div class="space-y-2">
+                  <Label>AI 分析提示词</Label>
+                  <Input
+                    v-model="taskSettings.videoCategories.aiPrompt"
+                    placeholder="自定义 AI 分析提示词（可选）"
+                  />
+                  <p class="text-xs text-muted-foreground">
+                    AI 将根据此提示词、视频描述、标签和热门评论来判断视频是否属于目标分类
+                  </p>
+                </div>
               </div>
             </CardContent>
           </Card>
@@ -950,6 +1078,18 @@ function getTaskName(taskId: string): string {
                   <Input type="number" v-model.number="taskSettings.commentReferenceCount" />
                   <p class="text-xs text-muted-foreground">AI生成评论时参考该视频的热门评论风格和话题</p>
                 </div>
+
+                <div class="space-y-2">
+                  <Label>自定义系统提示词（可选）</Label>
+                  <textarea
+                    v-model="taskSettings.commentSystemPrompt"
+                    class="w-full min-h-[100px] px-3 py-2 text-sm border rounded-md"
+                    placeholder="留空使用默认提示词。自定义提示词可以更灵活地控制评论生成风格，减少模板化..."
+                  />
+                  <p class="text-xs text-muted-foreground">
+                    自定义 AI 生成评论的系统提示词，可以更灵活地控制评论风格和内容
+                  </p>
+                </div>
               </div>
 
               <p class="text-sm text-muted-foreground">
@@ -970,12 +1110,22 @@ function getTaskName(taskId: string): string {
                 <p>暂无执行记录</p>
               </div>
               <div v-else class="space-y-3">
-                <div v-for="record in selectedTaskHistory" :key="record.id" class="p-3 bg-accent rounded-lg">
+                <div class="flex items-center justify-between mb-3">
+                  <span class="text-sm text-muted-foreground">共 {{ selectedTaskHistory.length }} 条记录</span>
+                  <Button
+                    size="sm"
+                    variant="destructive"
+                    @click="clearTaskHistory"
+                  >
+                    清空历史
+                  </Button>
+                </div>
+                <div v-for="record in selectedTaskHistory" :key="record.id" class="p-3 bg-accent rounded-lg cursor-pointer hover:bg-accent/80 transition-colors" @click="viewHistoryDetail(record)">
                   <div class="flex items-center justify-between mb-2">
                     <div class="font-medium text-sm">任务 #{{ record.id.slice(0, 8) }}</div>
-                    <div :class="['text-sm font-medium', getStatusColor(record.status)]">
-                      {{ record.status }}
-                    </div>
+                    <Badge :variant="getStatusBadge(record.status)">
+                      {{ getStatusText(record.status) }}
+                    </Badge>
                   </div>
                   <div class="text-xs text-muted-foreground mb-2">
                     {{ formatTime(record.startTime) }}
@@ -984,9 +1134,23 @@ function getTaskName(taskId: string): string {
                   <div class="flex items-center gap-4 text-sm">
                     <span class="flex items-center gap-1">
                       <MessageSquare class="w-4 h-4" />
-                      {{ record.commentCount }}
+                      评论: {{ record.commentCount }}
                     </span>
-                    <span>处理 {{ record.videoRecords.length }} 个视频</span>
+                    <span class="flex items-center gap-1">
+                      <ThumbsUp class="w-4 h-4" />
+                      点赞: {{ record.likeCount }}
+                    </span>
+                    <span class="flex items-center gap-1">
+                      <Bookmark class="w-4 h-4" />
+                      收藏: {{ record.collectCount }}
+                    </span>
+                    <span class="flex items-center gap-1">
+                      <UserPlus class="w-4 h-4" />
+                      关注: {{ record.followCount }}
+                    </span>
+                  </div>
+                  <div class="text-xs text-muted-foreground mt-2">
+                    处理 {{ record.videoRecords.length }} 个视频
                   </div>
                 </div>
               </div>
@@ -1059,7 +1223,7 @@ function getTaskName(taskId: string): string {
             <CardTitle>实时日志</CardTitle>
           </CardHeader>
           <CardContent>
-            <div class="h-48 overflow-auto font-mono text-sm space-y-1">
+            <div ref="logContainer" class="h-48 overflow-auto font-mono text-sm space-y-1">
               <div v-for="(log, index) in taskStore.logs" :key="index">
                 {{ log.message }}
               </div>
@@ -1121,6 +1285,157 @@ function getTaskName(taskId: string): string {
           </Button>
           <Button variant="outline" @click="showScheduleDialog = false">关闭</Button>
           <Button @click="handleSchedule">设置定时</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <!-- 历史详情 -->
+    <Dialog v-model:open="showHistoryDetailDialog">
+      <DialogContent class="max-w-4xl max-h-[80vh] overflow-hidden flex flex-col">
+        <DialogHeader>
+          <DialogTitle>执行历史详情</DialogTitle>
+          <DialogDescription v-if="selectedHistoryRecord">
+            任务 #{{ selectedHistoryRecord.id.slice(0, 8) }} - {{ formatTime(selectedHistoryRecord.startTime) }}
+          </DialogDescription>
+        </DialogHeader>
+        <div v-if="selectedHistoryRecord" class="flex-1 overflow-auto space-y-4 py-4">
+          <!-- 统计数据 -->
+          <Card>
+            <CardHeader>
+              <CardTitle class="text-base">执行统计</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div class="space-y-1">
+                  <div class="flex items-center gap-2 text-muted-foreground">
+                    <MessageSquare class="w-4 h-4" />
+                    <span class="text-sm">评论</span>
+                  </div>
+                  <div class="text-2xl font-bold">{{ selectedHistoryRecord.commentCount }}</div>
+                </div>
+                <div class="space-y-1">
+                  <div class="flex items-center gap-2 text-muted-foreground">
+                    <ThumbsUp class="w-4 h-4" />
+                    <span class="text-sm">点赞</span>
+                  </div>
+                  <div class="text-2xl font-bold">{{ selectedHistoryRecord.likeCount }}</div>
+                </div>
+                <div class="space-y-1">
+                  <div class="flex items-center gap-2 text-muted-foreground">
+                    <Bookmark class="w-4 h-4" />
+                    <span class="text-sm">收藏</span>
+                  </div>
+                  <div class="text-2xl font-bold">{{ selectedHistoryRecord.collectCount }}</div>
+                </div>
+                <div class="space-y-1">
+                  <div class="flex items-center gap-2 text-muted-foreground">
+                    <UserPlus class="w-4 h-4" />
+                    <span class="text-sm">关注</span>
+                  </div>
+                  <div class="text-2xl font-bold">{{ selectedHistoryRecord.followCount }}</div>
+                </div>
+              </div>
+              <div class="mt-4 pt-4 border-t space-y-2">
+                <div class="flex justify-between text-sm">
+                  <span class="text-muted-foreground">状态</span>
+                  <Badge :variant="getStatusBadge(selectedHistoryRecord.status)">
+                    {{ getStatusText(selectedHistoryRecord.status) }}
+                  </Badge>
+                </div>
+                <div class="flex justify-between text-sm">
+                  <span class="text-muted-foreground">开始时间</span>
+                  <span>{{ formatTime(selectedHistoryRecord.startTime) }}</span>
+                </div>
+                <div v-if="selectedHistoryRecord.endTime" class="flex justify-between text-sm">
+                  <span class="text-muted-foreground">结束时间</span>
+                  <span>{{ formatTime(selectedHistoryRecord.endTime) }}</span>
+                </div>
+                <div class="flex justify-between text-sm">
+                  <span class="text-muted-foreground">处理视频</span>
+                  <span>{{ selectedHistoryRecord.videoRecords.length }} 个</span>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          <!-- 视频记录 -->
+          <Card>
+            <CardHeader>
+              <CardTitle class="text-base">视频记录</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div v-if="!selectedHistoryRecord.videoRecords || selectedHistoryRecord.videoRecords.length === 0" class="text-center py-8 text-muted-foreground">
+                <p>暂无视频记录</p>
+              </div>
+              <div v-else class="space-y-3 max-h-[600px] overflow-auto">
+                <div v-for="(video, index) in selectedHistoryRecord.videoRecords" :key="index" class="p-3 rounded border" :class="{
+                  'bg-green-50 dark:bg-green-950 border-green-200 dark:border-green-800': !video.skipReason,
+                  'bg-gray-50 dark:bg-gray-900 border-gray-200 dark:border-gray-800': video.skipReason
+                }">
+                  <!-- 视频基本信息 -->
+                  <div class="flex items-start justify-between mb-2">
+                    <div class="flex-1">
+                      <div class="font-medium text-sm">@{{ video.authorName }}</div>
+                      <div class="text-xs text-muted-foreground mt-1">{{ video.videoDesc || '无描述' }}</div>
+                      <div v-if="video.videoTags && video.videoTags.length > 0" class="flex flex-wrap gap-1 mt-1">
+                        <Badge v-for="tag in video.videoTags" :key="tag" variant="outline" class="text-xs">{{ tag }}</Badge>
+                      </div>
+                    </div>
+                    <div class="text-xs text-muted-foreground whitespace-nowrap ml-2">
+                      {{ new Date(video.timestamp).toLocaleTimeString('zh-CN') }}
+                    </div>
+                  </div>
+
+                  <!-- 操作状态 -->
+                  <div class="flex items-center gap-3 text-xs mt-2">
+                    <span v-if="video.skipReason" class="text-orange-600 dark:text-orange-400">
+                      ⏭️ 跳过: {{ video.skipReason }}
+                    </span>
+                    <template v-else>
+                      <span v-if="video.isCommented" class="text-green-600 dark:text-green-400">✅ 已评论</span>
+                      <span v-if="video.isLiked" class="text-blue-600 dark:text-blue-400">👍 已点赞</span>
+                      <span v-if="video.isCollected" class="text-yellow-600 dark:text-yellow-400">⭐ 已收藏</span>
+                      <span v-if="video.isFollowed" class="text-purple-600 dark:text-purple-400">➕ 已关注</span>
+                    </template>
+                  </div>
+
+                  <!-- AI分析结果 -->
+                  <div v-if="video.aiFilterResult" class="mt-2 p-2 bg-blue-50 dark:bg-blue-950 rounded text-xs">
+                    <div class="font-medium text-blue-700 dark:text-blue-300 mb-1">🤖 AI分类判断</div>
+                    <div class="text-blue-600 dark:text-blue-400">
+                      结果: {{ video.aiFilterResult.matched ? '✅ 匹配' : '❌ 不匹配' }}
+                    </div>
+                    <div class="text-blue-600 dark:text-blue-400 mt-1">
+                      理由: {{ video.aiFilterResult.reason }}
+                    </div>
+                  </div>
+
+                  <!-- 评论详情 -->
+                  <div v-if="video.isCommented && video.commentText" class="mt-2 p-2 bg-green-50 dark:bg-green-950 rounded text-xs">
+                    <div class="font-medium text-green-700 dark:text-green-300 mb-1">💬 评论内容</div>
+                    <div class="text-green-600 dark:text-green-400">{{ video.commentText }}</div>
+                  </div>
+
+                  <!-- AI评论生成详情 -->
+                  <div v-if="video.aiCommentResult" class="mt-2 p-2 bg-purple-50 dark:bg-purple-950 rounded text-xs">
+                    <div class="font-medium text-purple-700 dark:text-purple-300 mb-1">🤖 AI评论生成</div>
+                    <div v-if="video.aiCommentResult.topComments && video.aiCommentResult.topComments.length > 0" class="mb-2">
+                      <div class="text-purple-600 dark:text-purple-400 mb-1">参考热门评论:</div>
+                      <div v-for="(comment, idx) in video.aiCommentResult.topComments.slice(0, 3)" :key="idx" class="text-purple-500 dark:text-purple-500 ml-2">
+                        • {{ comment.content }} ({{ comment.likeCount }} 赞)
+                      </div>
+                    </div>
+                    <div class="text-purple-600 dark:text-purple-400">
+                      生成: {{ video.aiCommentResult.comment }}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" @click="showHistoryDetailDialog = false">关闭</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

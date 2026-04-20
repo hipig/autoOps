@@ -219,8 +219,16 @@ export class TaskManager extends EventEmitter {
     this.runners.set(taskId, runner)
     this.accountLastRunTime.set(config.accountId || '', Date.now())
 
+    // 存储 platform 到 runner
+    ;(runner as any).platform = config.platform
+
     // 绑定事件转发
     this.forwardRunnerEvents(taskId, runner)
+
+    // 延迟保存初始历史记录（等待任务初始化完成）
+    setTimeout(() => {
+      this.saveTaskHistory(runner, taskId)
+    }, 1000)
 
     // 任务停止后清理
     runner.on('stopped', () => {
@@ -230,28 +238,51 @@ export class TaskManager extends EventEmitter {
         const taskNameFromRunner = (runner as any).taskName || '未命名任务'
         const accountId = config.accountId || ''
         const platform = config.platform
-            
+
         const historyRecord = runner.buildHistoryRecord(
           crudTaskId,
           taskNameFromRunner,
           accountId,
           platform
         )
-            
+
         // 读取现有历史并添加新记录
         const existingHistory = store.get(StorageKey.TASK_HISTORY) as TaskHistoryRecord[] | null || []
-        existingHistory.unshift(historyRecord)
+        const existingIndex = existingHistory.findIndex(h => h.id === historyRecord.id)
+
+        if (existingIndex >= 0) {
+          // 更新现有记录
+          existingHistory[existingIndex] = historyRecord
+        } else {
+          // 添加新记录
+          existingHistory.unshift(historyRecord)
+        }
+
         store.set(StorageKey.TASK_HISTORY, existingHistory)
         log.info(`[TaskManager] Task history saved: ${historyRecord.id}`)
       } catch (err) {
         log.error('[TaskManager] Failed to save task history:', err)
       }
-          
+
       this.runners.delete(taskId)
       log.info(`[TaskManager] Task ${taskId} stopped, remaining: ${this.runners.size}`)
       this.emit('taskStopped', { taskId, status: runner.status })
       // 处理队列
       this.processQueue()
+    })
+
+    // 监听实时历史更新事件
+    runner.on('historyUpdate', (counts: any) => {
+      this.emit('historyUpdate', { taskId, ...counts })
+      // 实时保存历史记录
+      this.saveTaskHistory(runner, taskId)
+    })
+
+    // 监听详细日志事件
+    runner.on('detailedLog', (logEntry: any) => {
+      this.emit('detailedLog', { taskId, logEntry })
+      // 实时保存历史记录（包含日志）
+      this.saveTaskHistory(runner, taskId)
     })
 
     this.emit('taskStarted', { taskId, taskName })
@@ -270,6 +301,10 @@ export class TaskManager extends EventEmitter {
       return { success: false, error: 'Task already paused' }
     }
     await runner.pause()
+    // 暂停时保存历史记录（状态仍为 running）
+    setTimeout(() => {
+      this.saveTaskHistory(runner, taskId)
+    }, 100)
     return { success: true }
   }
 
@@ -297,9 +332,44 @@ export class TaskManager extends EventEmitter {
       return { success: false, error: 'Task not found' }
     }
     await runner.stop()
-    this.runners.delete(taskId)
-    this.processQueue()
+    // 停止操作会触发 'stopped' 事件，在事件处理中保存历史记录
     return { success: true }
+  }
+
+  /**
+   * 保存任务历史记录
+   */
+  private saveTaskHistory(runner: TaskRunner, taskId: string): void {
+    try {
+      const crudTaskId = (runner as any).crudTaskId || ''
+      const taskName = (runner as any).taskName || '未命名任务'
+      const accountId = (runner as any).accountId || ''
+      const platform = (runner as any).platform || 'douyin'
+
+      const historyRecord = runner.buildHistoryRecord(
+        crudTaskId,
+        taskName,
+        accountId,
+        platform
+      )
+
+      // 读取现有历史并更新或添加记录
+      const existingHistory = store.get(StorageKey.TASK_HISTORY) as TaskHistoryRecord[] | null || []
+      const existingIndex = existingHistory.findIndex(h => h.id === historyRecord.id)
+
+      if (existingIndex >= 0) {
+        // 更新现有记录
+        existingHistory[existingIndex] = historyRecord
+      } else {
+        // 添加新记录
+        existingHistory.unshift(historyRecord)
+      }
+
+      store.set(StorageKey.TASK_HISTORY, existingHistory)
+      log.info(`[TaskManager] Task history saved: ${historyRecord.id}`)
+    } catch (err) {
+      log.error('[TaskManager] Failed to save task history:', err)
+    }
   }
 
   /**

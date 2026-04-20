@@ -11,7 +11,7 @@ import { createAIService, type AIService } from '../integration/ai/factory'
 import { AISettings } from '../../shared/ai-setting'
 import { sleep, random, generateId } from '../utils/common'
 import log from 'electron-log/main'
-import { TaskHistoryRecord } from '../../shared/task-history'
+import { TaskHistoryRecord, LogEntry } from '../../shared/task-history'
 
 export interface TaskRunConfig {
   browserExecPath: string
@@ -46,6 +46,9 @@ export class TaskRunner extends EventEmitter {
   private _likeCount = 0  // 点赞成功数
   private _collectCount = 0  // 收藏成功数
   private _followCount = 0  // 关注成功数
+  private _logs: LogEntry[] = []  // 详细日志
+  private currentVideoAIFilter?: { matched: boolean; reason: string; prompt?: string }  // 当前视频的AI过滤结果
+  private currentVideoAIComment?: { comment: string; topComments?: Array<{ content: string; likeCount: number }>; prompt?: string }  // 当前视频的AI评论结果
 
   get status(): TaskRunnerStatus {
     return this._status
@@ -134,6 +137,9 @@ export class TaskRunner extends EventEmitter {
     await sleep(2000)
     log.info(`[TaskRunner ${this.taskId}] Page loaded, video cache size: ${this.videoCache.size}`)
 
+    // 自动点击首页第一个视频进入播放模式
+    await this.autoEnterVideoMode()
+
     const aiSettings = store.get(StorageKey.AI_SETTINGS) as AISettings | null
     if (aiSettings && config.settings.aiCommentEnabled) {
       this.aiService = createAIService(aiSettings.platform, {
@@ -180,6 +186,9 @@ export class TaskRunner extends EventEmitter {
     // 等待页面加载并让 feed API 数据先到达缓存
     await sleep(2000)
     log.info(`[TaskRunner ${this.taskId}] Page loaded, video cache size: ${this.videoCache.size}`)
+
+    // 自动点击首页第一个视频进入播放模式
+    await this.autoEnterVideoMode()
 
     const aiSettings = store.get(StorageKey.AI_SETTINGS) as AISettings | null
     if (aiSettings && config.settings.aiCommentEnabled) {
@@ -299,6 +308,7 @@ export class TaskRunner extends EventEmitter {
     this._likeCount = 0
     this._collectCount = 0
     this._followCount = 0
+    this._logs = []
   
     this.emit('progress', { message: `任务类型: ${this.getTaskTypeName(taskType)}, 目标: ${maxCount}`, timestamp: Date.now() })
   
@@ -319,9 +329,13 @@ export class TaskRunner extends EventEmitter {
       })
 
       this.currentVideoStartTime = Date.now()
+      // 重置当前视频的AI结果
+      this.currentVideoAIFilter = undefined
+      this.currentVideoAIComment = undefined
 
-      const videoSwitchWaitMs = settings.videoSwitchWaitMs || 2000
-      await sleep(videoSwitchWaitMs)
+      const videoSwitchWaitRange = settings.videoSwitchWaitRange || [5, 10]
+      const waitSeconds = random(videoSwitchWaitRange[0], videoSwitchWaitRange[1])
+      await sleep(waitSeconds * 1000)
 
       const videoInfo = await this.getCurrentVideoInfo()
       if (!videoInfo) {
@@ -339,6 +353,7 @@ export class TaskRunner extends EventEmitter {
       const videoTypeCheck = this.checkVideoType(videoInfo, settings)
       if (videoTypeCheck.shouldSkip) {
         this.log('info', `跳过${videoTypeCheck.reason}: @${videoInfo.author.nickname}`)
+        await this.recordSkip(videoInfo, videoTypeCheck.reason)
         this.consecutiveSkipCount++
         if (this.consecutiveSkipCount >= maxConsecutiveSkips) {
           this.log('error', `连续跳过 ${this.consecutiveSkipCount} 次，超过阈值 ${maxConsecutiveSkips}，任务暂停`)
@@ -352,6 +367,8 @@ export class TaskRunner extends EventEmitter {
       const categoryCheck = await this.checkVideoCategory(videoInfo, settings)
       if (categoryCheck.shouldSkip) {
         this.log('info', `跳过(${categoryCheck.reason}): @${videoInfo.author.nickname}`)
+        // 记录跳过的视频，包含AI分析结果
+        await this.recordSkip(videoInfo, categoryCheck.reason, categoryCheck.aiResult)
         this.consecutiveSkipCount++
         if (this.consecutiveSkipCount >= maxConsecutiveSkips) {
           this.log('error', `连续跳过 ${this.consecutiveSkipCount} 次，超过阈值 ${maxConsecutiveSkips}，任务暂停`)
@@ -359,12 +376,16 @@ export class TaskRunner extends EventEmitter {
         }
         await this.goToNextVideo()
         continue
+      } else if (categoryCheck.aiResult) {
+        // 即使没有跳过，也记录AI分析结果到当前视频
+        this.currentVideoAIFilter = categoryCheck.aiResult
       }
 
       this.log('info', `视频作者: @${videoInfo.author.nickname}`)
       this.log('info', `视频描述: ${videoInfo.description}`)
 
       if (this.checkBlockKeywords(videoInfo, settings)) {
+        await this.recordSkip(videoInfo, '命中屏蔽词')
         this.consecutiveSkipCount++
         await this.goToNextVideo()
         continue
@@ -384,8 +405,8 @@ export class TaskRunner extends EventEmitter {
       }
 
       if (settings.simulateWatchBeforeComment) {
-        const watchTime = random(settings.watchTimeRangeSeconds[0], settings.watchTimeRangeSeconds[1]) * 1000
-        this.log('info', `模拟观看 ${watchTime / 1000} 秒`)
+        const watchTime = this.calculateWatchTime(videoInfo, settings)
+        this.log('info', `模拟观看 ${(watchTime / 1000).toFixed(1)} 秒`)
         await sleep(watchTime)
       }
 
@@ -404,6 +425,8 @@ export class TaskRunner extends EventEmitter {
           if (result.action === 'like') this._likeCount++
           if (result.action === 'collect') this._collectCount++
           if (result.action === 'follow') this._followCount++
+          // 实时更新历史记录
+          this.emitHistoryUpdate()
           // 记录成功操作的视频
           this.recordSuccess(videoInfo, result.action, result.commentText)
         }
@@ -418,7 +441,12 @@ export class TaskRunner extends EventEmitter {
       }
 
       await sleep(random(1000, 3000))
-      await this.goToNextVideo()
+
+      // 检查是否已经在验证码处理时自动刷新了视频
+      const hasAutoRefreshed = results.some(r => !r.success && r.error?.includes('验证码已处理'))
+      if (!hasAutoRefreshed) {
+        await this.goToNextVideo()
+      }
     }
 
     if (this._stopped) {
@@ -450,9 +478,7 @@ export class TaskRunner extends EventEmitter {
           await sleep(1000)
           continue
         }
-        // videoId 获取失败，尝试 DOM 降级
-        const domInfo = await this.getVideoInfoFromDOM()
-        if (domInfo) return domInfo
+        
         return null
       }
 
@@ -466,12 +492,7 @@ export class TaskRunner extends EventEmitter {
         // cache 未命中，尝试 adapter 的 getVideoInfo
         const adapterInfo = await this.adapter.getVideoInfo(videoId)
         if (adapterInfo) return adapterInfo
-        // 最终降级：从 DOM 提取
-        const domInfo = await this.getVideoInfoFromDOM()
-        if (domInfo) {
-          domInfo.videoId = videoId
-          return domInfo
-        }
+
         return null
       }
 
@@ -588,35 +609,154 @@ export class TaskRunner extends EventEmitter {
   /**
    * 检查视频分类，判断是否在目标分类内
    */
-  private async checkVideoCategory(videoInfo: VideoInfo, settings: FeedAcSettingsV3): Promise<{ shouldSkip: boolean; reason: string }> {
+  private async checkVideoCategory(videoInfo: VideoInfo, settings: FeedAcSettingsV3): Promise<{ shouldSkip: boolean; reason: string; aiResult?: { matched: boolean; reason: string; prompt?: string } }> {
     const { videoCategories } = settings
     if (!videoCategories?.enabled) return { shouldSkip: false, reason: '' }
 
-    const { categories, customKeywords, mode, useAI } = videoCategories
+    const { categories, customKeywords, mode, useAI, prioritizeAI, aiPrompt } = videoCategories
     const allKeywords = [...(categories || []), ...(customKeywords || [])]
     if (allKeywords.length === 0) return { shouldSkip: false, reason: '' }
 
-    // 先用 video_tag 和 description 做关键词匹配
     const textToMatch = `${videoInfo.description} ${videoInfo.tags.join(' ')}`
+
+    // 优先使用AI分析（如果启用）
+    if (prioritizeAI && useAI && this.aiService) {
+      try {
+        // 获取热门评论作为上下文
+        let topComments: Array<{ content: string; likeCount: number }> = []
+        if (this.adapter instanceof DouyinPlatformAdapter) {
+          const refCount = Math.min(settings.commentReferenceCount || 3, 3) // 分类判断用较少评论
+          this.log('info', `获取热门评论(${refCount}条)用于AI分类判断...`)
+          topComments = await this.adapter.getTopComments(videoInfo.videoId, refCount)
+        }
+
+        const filterContext = {
+          videoDesc: videoInfo.description,
+          videoTags: videoInfo.tags,
+          topComments,
+          targetCategories: allKeywords
+        }
+
+        this.log('info', `使用AI判断视频分类...`)
+        const result = await this.aiService.analyzeVideoCategory(filterContext, aiPrompt)
+
+        const aiMatched = result.shouldWatch
+        this.log('info', `AI判断结果: ${aiMatched ? '匹配' : '不匹配'} - ${result.reason}`)
+
+        const aiResult = {
+          matched: aiMatched,
+          reason: result.reason || '',
+          prompt: aiPrompt
+        }
+
+        // AI判断后，根据模式决定是否跳过
+        if (mode === 'whitelist' && !aiMatched) {
+          return { shouldSkip: true, reason: `AI判断: ${result.reason || '不在目标分类'}`, aiResult }
+        }
+        if (mode === 'blacklist' && aiMatched) {
+          return { shouldSkip: true, reason: `AI判断: ${result.reason || '在排除分类'}`, aiResult }
+        }
+
+        return { shouldSkip: false, reason: '', aiResult }
+      } catch (e) {
+        this.log('warn', `AI分类分析失败: ${e}，回退到关键词匹配`)
+        // AI失败，回退到关键词匹配
+      }
+    }
+
+    // 关键词匹配（作为备选或非优先AI时使用）
     const keywordMatched = allKeywords.some(kw => textToMatch.includes(kw))
 
-    // 如果关键词未匹配且启用了AI分析，调用AI判断
-    let aiMatched = false
-    if (!keywordMatched && useAI && this.aiService) {
+    // 如果关键词未匹配且启用了AI（但不优先），尝试AI判断
+    if (!keywordMatched && useAI && !prioritizeAI && this.aiService) {
       try {
-        const prompt = `判断这个视频是否属于以下分类：${allKeywords.join('、')}。视频信息：${textToMatch}`
-        const result = await this.aiService.analyzeVideoType(textToMatch, prompt)
-        aiMatched = result.shouldWatch
+        let topComments: Array<{ content: string; likeCount: number }> = []
+        if (this.adapter instanceof DouyinPlatformAdapter) {
+          const refCount = Math.min(settings.commentReferenceCount || 3, 3)
+          topComments = await this.adapter.getTopComments(videoInfo.videoId, refCount)
+        }
+
+        const filterContext = {
+          videoDesc: videoInfo.description,
+          videoTags: videoInfo.tags,
+          topComments,
+          targetCategories: allKeywords
+        }
+
+        const result = await this.aiService.analyzeVideoCategory(filterContext, aiPrompt)
+        const aiMatched = result.shouldWatch
+
+        const aiResult = {
+          matched: aiMatched,
+          reason: result.reason || '',
+          prompt: aiPrompt
+        }
+
+        if (mode === 'whitelist' && !aiMatched) {
+          return { shouldSkip: true, reason: `AI判断: ${result.reason || '不在目标分类'}`, aiResult }
+        }
+        if (mode === 'blacklist' && aiMatched) {
+          return { shouldSkip: true, reason: `AI判断: ${result.reason || '在排除分类'}`, aiResult }
+        }
+
+        return { shouldSkip: false, reason: '', aiResult }
       } catch {
         this.log('warn', 'AI分类分析失败')
       }
     }
 
-    const matched = keywordMatched || aiMatched
-    if (mode === 'whitelist' && !matched) return { shouldSkip: true, reason: '不在目标分类' }
-    if (mode === 'blacklist' && matched) return { shouldSkip: true, reason: '在排除分类' }
+    // 最终根据关键词匹配结果决定
+    if (mode === 'whitelist' && !keywordMatched) return { shouldSkip: true, reason: '不在目标分类' }
+    if (mode === 'blacklist' && keywordMatched) return { shouldSkip: true, reason: '在排除分类' }
 
     return { shouldSkip: false, reason: '' }
+  }
+
+  /**
+   * 计算观看时长
+   */
+  private calculateWatchTime(videoInfo: VideoInfo, settings: FeedAcSettingsV3): number {
+    const mode = settings.watchTimeMode || 'fixed'
+
+    if (mode === 'percentage' && videoInfo.duration) {
+      // 根据视频时长百分比计算
+      const percentageRange = settings.watchTimePercentageRange || [0.2, 0.5]
+      const minPercentage = percentageRange[0]
+      const maxPercentage = percentageRange[1]
+      const percentage = minPercentage + Math.random() * (maxPercentage - minPercentage)
+      const watchTime = Math.floor(videoInfo.duration * percentage * 1000)
+      // 限制最小1秒，最大不超过视频时长
+      return Math.max(1000, Math.min(watchTime, videoInfo.duration * 1000))
+    }
+
+    // 固定时长模式
+    const minSeconds = settings.watchTimeRangeSeconds[0]
+    const maxSeconds = settings.watchTimeRangeSeconds[1]
+    return random(minSeconds, maxSeconds) * 1000
+  }
+
+  /**
+   * 自动进入视频播放模式（点击首页第一个视频）
+   */
+  private async autoEnterVideoMode(): Promise<void> {
+    if (!this.page) return
+    try {
+      // 等待视频列表加载
+      const firstVideo = await this.page.waitForSelector('[data-e2e="recommend-list-item-container"]', {
+        timeout: 5000
+      }).catch(() => null)
+
+      if (firstVideo) {
+        log.info(`[TaskRunner ${this.taskId}] 自动点击首页第一个视频进入播放模式`)
+        await firstVideo.click()
+        await sleep(1500)
+        log.info(`[TaskRunner ${this.taskId}] 已进入视频播放模式`)
+      } else {
+        log.warn(`[TaskRunner ${this.taskId}] 未找到首页视频，可能需要手动点击`)
+      }
+    } catch (e) {
+      log.warn(`[TaskRunner ${this.taskId}] 自动进入视频模式失败: ${e}`)
+    }
   }
 
   private async goToNextVideo(): Promise<void> {
@@ -701,17 +841,17 @@ export class TaskRunner extends EventEmitter {
     settings: FeedAcSettingsV3,
     taskType: TaskType,
     operationCounts: Record<string, number>
-  ): Promise<Array<{ success: boolean; action: string; commentText?: string }>> {
-    const results: Array<{ success: boolean; action: string; commentText?: string }> = []
+  ): Promise<Array<{ success: boolean; action: string; commentText?: string; error?: string }>> {
+    const results: Array<{ success: boolean; action: string; commentText?: string; error?: string }> = []
 
     if (taskType === 'combo') {
       for (const op of settings.operations) {
         if (!op.enabled) continue
         if (op.maxCount && (operationCounts[op.type] || 0) >= op.maxCount) continue
         if (Math.random() > op.probability) continue
-    
+
         const result = await this.executeSingleOperation(videoInfo, op.type, settings, op)
-        results.push({ success: result.success, action: op.type, commentText: result.commentText })
+        results.push({ success: result.success, action: op.type, commentText: result.commentText, error: result.error })
         if (settings.comboStopOnFirstSuccess && result.success) break
       }
     } else {
@@ -719,7 +859,7 @@ export class TaskRunner extends EventEmitter {
       if (operation && operation.enabled) {
         if (Math.random() <= operation.probability) {
           const result = await this.executeSingleOperation(videoInfo, taskType, settings, operation)
-          results.push({ success: result.success, action: taskType, commentText: result.commentText })
+          results.push({ success: result.success, action: taskType, commentText: result.commentText, error: result.error })
         }
       }
     }
@@ -755,10 +895,10 @@ export class TaskRunner extends EventEmitter {
     operation: FeedAcSettingsV3['operations'][0]
   ): Promise<{ success: boolean; error?: string; commentText?: string }> {
     if (!this.adapter) return { success: false, error: 'Adapter not initialized' }
-  
+
     await this.adapter.openCommentSection()
     await sleep(random(2000, 4000))
-  
+
     if (settings.onlyCommentActiveVideo && this.adapter) {
       const commentData = await this.adapter.getCommentList(videoInfo.videoId)
       if (commentData && commentData.comments.length > 0) {
@@ -771,10 +911,10 @@ export class TaskRunner extends EventEmitter {
         }
       }
     }
-  
+
     let commentText = ''
     const useAI = (operation.aiEnabled || settings.aiCommentEnabled) && this.aiService
-  
+
     if (useAI) {
       try {
         let topComments: Array<{ content: string; likeCount: number }> = []
@@ -786,22 +926,30 @@ export class TaskRunner extends EventEmitter {
             this.log('info', `获取到 ${topComments.length} 条热门评论`)
           }
         }
-  
-        const result = await this.aiService!.generateComment(
-          {
-            author: videoInfo.author.nickname,
-            videoDesc: videoInfo.description,
-            videoTags: videoInfo.tags,
-            topComments
-          },
-          {
-            style: settings.commentStyle || 'mixed',
-            maxLength: settings.commentMaxLength || 50,
-            customPrompt: operation.aiPrompt
-          }
-        )
+
+        const videoContext = {
+          author: videoInfo.author.nickname,
+          videoDesc: videoInfo.description,
+          videoTags: videoInfo.tags,
+          topComments
+        }
+        const commentOptions = {
+          style: settings.commentStyle || 'mixed',
+          maxLength: settings.commentMaxLength || 50,
+          customPrompt: operation.aiPrompt,
+          systemPrompt: settings.commentSystemPrompt
+        }
+
+        const result = await this.aiService!.generateComment(videoContext, commentOptions)
         commentText = result.content
         this.log('info', `AI生成评论: ${commentText}`)
+
+        // 保存AI评论结果到当前视频
+        this.currentVideoAIComment = {
+          comment: commentText,
+          topComments,
+          prompt: operation.aiPrompt || settings.commentSystemPrompt
+        }
       } catch {
         this.log('warn', 'AI生成评论失败，使用备选评论')
         commentText = this.getRandomComment(operation.commentTexts || [])
@@ -809,10 +957,16 @@ export class TaskRunner extends EventEmitter {
     } else {
       commentText = this.getRandomComment(operation.commentTexts || [])
     }
-  
+
     const result = await this.adapter.comment(videoInfo.videoId, commentText)
+
+    // 如果评论失败且错误信息包含"验证码已处理"，说明已经自动刷新了视频，不需要再关闭评论区
+    if (!result.success && result.error?.includes('验证码已处理')) {
+      return { success: false, error: result.error, commentText: undefined }
+    }
+
     if (this.adapter) await this.adapter.closeCommentSection()
-  
+
     return { success: result.success, error: result.error, commentText: result.success ? commentText : undefined }
   }
 
@@ -836,7 +990,7 @@ export class TaskRunner extends EventEmitter {
     return texts[Math.floor(Math.random() * texts.length)]
   }
 
-  private async recordSkip(videoInfo: VideoInfo, reason: string): Promise<void> {
+  private async recordSkip(videoInfo: VideoInfo, reason: string, aiResult?: { matched: boolean; reason: string; prompt?: string }): Promise<void> {
     const record: VideoRecord = {
       videoId: videoInfo.videoId,
       authorName: videoInfo.author.nickname,
@@ -850,7 +1004,8 @@ export class TaskRunner extends EventEmitter {
       isFollowed: false,
       isCommented: false,
       skipReason: reason,
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      aiFilterResult: aiResult
     }
     this._videoRecords.push(record)
     this.emit('progress', {
@@ -865,13 +1020,17 @@ export class TaskRunner extends EventEmitter {
   private recordSuccess(videoInfo: VideoInfo, action: string, commentText?: string): void {
     // 查找是否已有该视频的记录（可能之前记录过跳过或其他操作）
     const existingIndex = this._videoRecords.findIndex(r => r.videoId === videoInfo.videoId)
-      
+
     if (existingIndex >= 0) {
       // 更新现有记录
       const record = this._videoRecords[existingIndex]
       if (action === 'comment') {
         record.isCommented = true
         record.commentText = commentText
+        // 添加AI评论结果
+        if (this.currentVideoAIComment) {
+          record.aiCommentResult = this.currentVideoAIComment
+        }
       } else if (action === 'like') {
         record.isLiked = true
       } else if (action === 'collect') {
@@ -880,6 +1039,10 @@ export class TaskRunner extends EventEmitter {
         record.isFollowed = true
       }
       record.skipReason = undefined  // 成功操作后移除跳过原因
+      // 添加AI过滤结果（如果有）
+      if (this.currentVideoAIFilter && !record.aiFilterResult) {
+        record.aiFilterResult = this.currentVideoAIFilter
+      }
     } else {
       // 创建新记录
       const record: VideoRecord = {
@@ -895,7 +1058,9 @@ export class TaskRunner extends EventEmitter {
         isFollowed: action === 'follow',
         isCommented: action === 'comment',
         commentText: action === 'comment' ? commentText : undefined,
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        aiFilterResult: this.currentVideoAIFilter,
+        aiCommentResult: action === 'comment' ? this.currentVideoAIComment : undefined
       }
       this._videoRecords.push(record)
     }
@@ -905,6 +1070,19 @@ export class TaskRunner extends EventEmitter {
    * 构建历史记录对象
    */
   buildHistoryRecord(taskId: string, taskName: string, accountId: string, platform: string): TaskHistoryRecord {
+    // 根据状态决定 endTime 和 status
+    let endTime: number | null = null
+    let status: TaskHistoryRecord['status'] = 'running'
+
+    if (this._status === 'completed' || this._status === 'stopped' || this._status === 'failed') {
+      endTime = Date.now()
+      status = this._status === 'failed' ? 'error' : this._status
+    } else if (this._status === 'running') {
+      status = 'running'
+    } else if (this._status === 'paused') {
+      status = 'running' // 暂停状态在历史记录中仍显示为运行中
+    }
+
     return {
       id: this.taskId,
       taskId,
@@ -912,15 +1090,43 @@ export class TaskRunner extends EventEmitter {
       accountId,
       platform,
       startTime: this._startTime,
-      endTime: Date.now(),
-      status: this._status === 'failed' ? 'error' : (this._status === 'running' || this._status === 'paused' ? 'stopped' : this._status),
+      endTime,
+      status,
       commentCount: this._commentCount,
       likeCount: this._likeCount,
       collectCount: this._collectCount,
       followCount: this._followCount,
       videoRecords: [...this._videoRecords],
-      settings: {}
+      settings: {},
+      logs: [...this._logs]
     }
+  }
+
+  /**
+   * 添加详细日志
+   */
+  private addDetailedLog(level: 'info' | 'warn' | 'error', message: string, data?: LogEntry['data']): void {
+    const logEntry: LogEntry = {
+      timestamp: Date.now(),
+      level,
+      message,
+      data
+    }
+    this._logs.push(logEntry)
+    // 发送日志事件到前端
+    this.emit('detailedLog', logEntry)
+  }
+
+  /**
+   * 实时更新历史记录
+   */
+  private emitHistoryUpdate(): void {
+    this.emit('historyUpdate', {
+      commentCount: this._commentCount,
+      likeCount: this._likeCount,
+      collectCount: this._collectCount,
+      followCount: this._followCount
+    })
   }
 
   private getTaskTypeName(taskType: TaskType): string {

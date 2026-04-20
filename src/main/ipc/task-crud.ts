@@ -4,6 +4,7 @@ import type { Task, TaskTemplate } from '../../shared/task'
 import { generateTaskId, generateTemplateId } from '../../shared/task'
 import type { Platform, TaskType } from '../../shared/platform'
 import { getDefaultFeedAcSettingsV3 } from '../../shared/feed-ac-setting'
+import type { TaskHistoryRecord } from '../../shared/task-history'
 
 export function registerTaskIPC(): void {
   ipcMain.handle('task:getAll', async () => {
@@ -71,6 +72,12 @@ export function registerTaskIPC(): void {
       }
       const filtered = tasks.filter((t) => t.id !== id)
       store.set(StorageKey.TASKS, filtered)
+
+      // 同时删除该任务的所有历史记录
+      const history = store.get(StorageKey.TASK_HISTORY) as TaskHistoryRecord[] || []
+      const filteredHistory = history.filter((h) => h.taskId !== id)
+      store.set(StorageKey.TASK_HISTORY, filteredHistory)
+
       return { success: true }
     } catch (error) {
       return { success: false, error: String(error) }

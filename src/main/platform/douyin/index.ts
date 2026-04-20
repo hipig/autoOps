@@ -135,6 +135,66 @@ export class DouyinPlatformAdapter extends BasePlatformAdapter {
     this.page = await this.context.newPage()
     this.setPage(this.page)
     await this.setupVideoDataListener()
+
+    // 检查登录状态
+    await this.checkLoginStatus()
+  }
+
+  /**
+   * 检查登录状态
+   */
+  private async checkLoginStatus(): Promise<void> {
+    if (!this.page) return
+
+    try {
+      const currentUrl = this.page.url()
+
+      // 检查是否在登录页面
+      if (currentUrl.includes('login') || currentUrl === 'about:blank') {
+        this.log('warn', '检测到未登录，请先登录账号')
+        this.isLoggedIn = false
+
+        // 导航到抖音首页
+        await this.page.goto('https://www.douyin.com/', { waitUntil: 'domcontentloaded', timeout: 30000 })
+        await this.page.waitForTimeout(2000)
+
+        // 检查是否有登录面板
+        const loginPanel = await this.page.$(this.config.selectors.loginPanel!)
+        if (loginPanel) {
+          this.log('warn', '需要登录，等待用户登录...')
+          // 等待登录面板消失（用户完成登录）
+          await this.page.waitForSelector(this.config.selectors.loginPanel!, {
+            state: 'detached',
+            timeout: 300000 // 5分钟超时
+          }).catch(() => {
+            throw new Error('登录超时，请重新启动任务')
+          })
+
+          this.log('info', '登录成功，继续执行任务')
+          this.isLoggedIn = true
+          await this.page.waitForTimeout(2000)
+        } else {
+          this.isLoggedIn = true
+        }
+      } else {
+        // 检查页面上是否有登录按钮
+        const loginButton = await this.page.$('[class*="login"]').catch(() => null)
+        if (loginButton) {
+          const isVisible = await loginButton.isVisible().catch(() => false)
+          if (isVisible) {
+            this.log('warn', '检测到登录按钮，账号可能未登录')
+            this.isLoggedIn = false
+          } else {
+            this.isLoggedIn = true
+          }
+        } else {
+          this.isLoggedIn = true
+        }
+      }
+    } catch (e) {
+      log.warn('[DouyinAdapter] Login status check failed:', e)
+      this.isLoggedIn = false
+    }
   }
 
   private async setupVideoDataListener(): Promise<void> {
@@ -190,17 +250,86 @@ export class DouyinPlatformAdapter extends BasePlatformAdapter {
    */
   async getTopComments(videoId: string, count: number = 5): Promise<Array<{ content: string; likeCount: number }>> {
     const commentData = await this.getCommentList(videoId)
-    if (!commentData || commentData.comments.length === 0) return []
-    const sorted = [...commentData.comments].sort((a, b) => b.likeCount - a.likeCount)
-    return sorted.slice(0, count).map(c => ({
-      content: c.content,
-      likeCount: c.likeCount
-    }))
+    if (commentData && commentData.comments.length > 0) {
+      const sorted = [...commentData.comments].sort((a, b) => b.likeCount - a.likeCount)
+      return sorted.slice(0, count).map(c => ({
+        content: c.content,
+        likeCount: c.likeCount
+      }))
+    }
+
+    // 回退：从 DOM 获取评论
+    return this.getTopCommentsFromDOM(count)
+  }
+
+  /**
+   * 从 DOM 获取热门评论（回退方案）
+   */
+  private async getTopCommentsFromDOM(count: number = 5): Promise<Array<{ content: string; likeCount: number }>> {
+    if (!this.page) return []
+    try {
+      const comments = await this.page.evaluate((maxCount: number) => {
+        const commentList = document.querySelector('[data-e2e="comment-list"]')
+        if (!commentList) return []
+
+        const commentItems = commentList.querySelectorAll('[data-e2e="comment-item"]')
+        const results: Array<{ content: string; likeCount: number }> = []
+
+        for (let i = 0; i < Math.min(commentItems.length, maxCount); i++) {
+          const item = commentItems[i]
+          const textEl = item.querySelector('.comment-text, [class*="comment-text"]')
+          const likeEl = item.querySelector('.like-count, [class*="like-count"], [class*="digg-count"]')
+
+          const content = textEl?.textContent?.trim() || ''
+          let likeCount = 0
+
+          if (likeEl) {
+            const likeText = likeEl.textContent?.trim() || '0'
+            likeCount = parseInt(likeText.replace(/[^0-9]/g, ''), 10) || 0
+          }
+
+          if (content) {
+            results.push({ content, likeCount })
+          }
+        }
+
+        return results
+      }, count)
+
+      if (comments.length > 0) {
+        log.info(`[DouyinAdapter] DOM fallback: extracted ${comments.length} comments`)
+      }
+      return comments
+    } catch (e) {
+      log.warn(`[DouyinAdapter] DOM comment fallback failed: ${e}`)
+      return []
+    }
   }
 
   async getVideoInfo(videoId: string): Promise<VideoInfo | null> {
     const feedItem = this.videoCache.get(videoId)
     if (feedItem) {
+      // 从 DOM 获取时长信息
+      let duration: number | undefined
+      if (this.page) {
+        try {
+          duration = await this.page.evaluate(() => {
+            const durationEl = document.querySelector('[data-e2e="feed-active-video"] .time-duration')
+            if (!durationEl) return undefined
+            const durationText = durationEl.textContent?.trim() || ''
+            const parts = durationText.split(':').map(p => parseInt(p, 10))
+            if (parts.length === 2) {
+              return parts[0] * 60 + parts[1]
+            } else if (parts.length === 3) {
+              return parts[0] * 3600 + parts[1] * 60 + parts[2]
+            }
+            return undefined
+          })
+        } catch {
+          duration = undefined
+        }
+      }
+
       return {
         videoId: feedItem.aweme_id,
         title: feedItem.desc,
@@ -216,7 +345,8 @@ export class DouyinPlatformAdapter extends BasePlatformAdapter {
         shareCount: feedItem.statistics?.share_count || 0,
         commentCount: feedItem.statistics?.comment_count || 0,
         shareUrl: feedItem.share_url,
-        createTime: Date.now()
+        createTime: Date.now(),
+        duration
       }
     }
 
@@ -246,6 +376,19 @@ export class DouyinPlatformAdapter extends BasePlatformAdapter {
           activeVideo.querySelector('.desc')
         const description = descEl?.textContent?.trim() || ''
 
+        // 提取视频时长
+        const durationEl = activeVideo.querySelector('.time-duration')
+        let duration = 0
+        if (durationEl) {
+          const durationText = durationEl.textContent?.trim() || ''
+          const parts = durationText.split(':').map(p => parseInt(p, 10))
+          if (parts.length === 2) {
+            duration = parts[0] * 60 + parts[1]
+          } else if (parts.length === 3) {
+            duration = parts[0] * 3600 + parts[1] * 60 + parts[2]
+          }
+        }
+
         if (!nickname && !description) return null
 
         return {
@@ -263,7 +406,8 @@ export class DouyinPlatformAdapter extends BasePlatformAdapter {
           shareCount: 0,
           commentCount: 0,
           shareUrl: '',
-          createTime: Date.now()
+          createTime: Date.now(),
+          duration
         }
       }, videoId)
       if (info) {
@@ -387,32 +531,60 @@ export class DouyinPlatformAdapter extends BasePlatformAdapter {
 
       const result = await Promise.race([
         commentPromise,
-        sleep(5000).then(() => ({ success: false, reason: '评论发布接口响应超时' }))
-      ]) as { success: boolean; reason?: string }
+        sleep(10000).then(() => ({ success: false, reason: '评论发布接口响应超时' }))
+      ]) as { success: boolean; reason?: string; commentId?: string }
 
+      // 检查验证码
       const verifyDialog = await this.page.$(this.config.selectors.verifyDialog!)
       if (verifyDialog) {
         const isVisible = await verifyDialog.isVisible()
         if (isVisible) {
-          this.log('warn', '检测到验证码弹窗，等待用户完成')
-          await this.page.waitForSelector(this.config.selectors.verifyDialog!, { state: 'detached', timeout: 60000 }).catch(() => null)
+          this.log('warn', '检测到验证码弹窗，等待用户完成验证...')
+
+          // 等待验证码弹窗消失，最多等待5分钟
+          const verifyResult = await this.page.waitForSelector(this.config.selectors.verifyDialog!, {
+            state: 'detached',
+            timeout: 300000 // 5分钟
+          }).then(() => true).catch(() => false)
+
+          if (verifyResult) {
+            this.log('info', '验证码已完成')
+            await sleep(2000)
+
+            // 验证完成后，重新检查评论是否成功
+            // 如果之前评论失败，可以选择重试
+            if (!result.success) {
+              this.log('info', '验证完成后重新尝试发送评论')
+              return await this.comment(videoId, content)
+            }
+          } else {
+            this.log('error', '验证码处理超时')
+            return { success: false, error: '验证码处理超时' }
+          }
         }
       }
 
-      return { success: result.success, error: result.reason }
+      // 判断评论是否成功
+      if (result.success) {
+        this.log('info', `评论发布成功: ${content}`)
+        return { success: true, commentId: result.commentId }
+      } else {
+        this.log('warn', `评论发布失败: ${result.reason || '未知原因'}`)
+        return { success: false, error: result.reason || '评论发布失败' }
+      }
     } catch (e) {
       return { success: false, error: String(e) }
     }
   }
 
-  private async waitForCommentResponse(): Promise<{ success: boolean; reason?: string }> {
+  private async waitForCommentResponse(): Promise<{ success: boolean; reason?: string; commentId?: string }> {
     if (!this.page) return { success: false, reason: 'Page not initialized' }
 
     return new Promise((resolve) => {
       const timeoutId = setTimeout(() => {
         this.page?.removeListener('response', listener)
         resolve({ success: false, reason: '评论发布接口响应超时' })
-      }, 5000)
+      }, 10000)
 
       const listener = async (response: Response) => {
         const url = response.url()
@@ -421,7 +593,12 @@ export class DouyinPlatformAdapter extends BasePlatformAdapter {
           this.page?.removeListener('response', listener)
           try {
             const body = await response.json()
-            resolve({ success: body?.status_code === 0 })
+            if (body?.status_code === 0) {
+              resolve({ success: true, commentId: body?.comment?.cid })
+            } else {
+              const errorMsg = body?.status_msg || body?.message || '评论发布失败'
+              resolve({ success: false, reason: errorMsg })
+            }
           } catch {
             resolve({ success: false, reason: '解析响应失败' })
           }
@@ -485,14 +662,30 @@ export class DouyinPlatformAdapter extends BasePlatformAdapter {
 
   async openCommentSection(): Promise<void> {
     if (!this.page) return
+
+    // 检查评论区是否已经打开
+    const isOpen = await this.isCommentSectionOpen()
+    if (isOpen) {
+      this.log('info', '评论区已打开，无需重复操作')
+      return
+    }
+
     await this.page.keyboard.press(this.config.keyboardShortcuts.comment)
-    await this.page.waitForTimeout(300)
+    await this.page.waitForTimeout(800)
   }
 
   async closeCommentSection(): Promise<void> {
     if (!this.page) return
+
+    // 检查评论区是否已经关闭
+    const isOpen = await this.isCommentSectionOpen()
+    if (!isOpen) {
+      this.log('info', '评论区已关闭，无需重复操作')
+      return
+    }
+
     await this.page.keyboard.press(this.config.keyboardShortcuts.comment)
-    await this.page.waitForTimeout(300)
+    await this.page.waitForTimeout(800)
   }
 
   async isCommentSectionOpen(): Promise<boolean> {

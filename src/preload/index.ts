@@ -42,6 +42,7 @@ export interface ElectronAPI {
     onStopped: (callback: (data: { taskId: string; status: string }) => void) => () => void
     onQueued: (callback: (data: { queueId: string; taskName?: string }) => void) => () => void
     onScheduleTriggered: (callback: (data: { taskId: string; cron: string }) => void) => () => void
+    onHistoryUpdate: (callback: (data: { taskId: string; commentCount: number; likeCount: number; collectCount: number; followCount: number }) => void) => () => void
   }
   'feed-ac-settings': {
     get: () => Promise<unknown>
@@ -75,6 +76,7 @@ export interface ElectronAPI {
     getActiveAccounts: () => Promise<unknown[]>
     checkStatus: (id: string) => Promise<{ status: string; expiresAt?: number }>
     onStatusChanged: (callback: (data: { accountId: string; status: string; expiresAt?: number }) => void) => () => void
+    refreshInfo: (id: string) => Promise<{ success: boolean; error?: string; account?: unknown }>
   }
   login: {
     douyin: () => Promise<{ success: boolean; storageState?: string; error?: string; userInfo?: { nickname: string; avatar?: string; uniqueId?: string } }>
@@ -97,6 +99,8 @@ export interface ElectronAPI {
     add: (record: unknown) => Promise<{ success: boolean }>
     update: (id: string, updates: unknown) => Promise<{ success: boolean }>
     delete: (id: string) => Promise<{ success: boolean }>
+    deleteByTaskId: (taskId: string) => Promise<{ success: boolean }>
+    deleteBatch: (ids: string[]) => Promise<{ success: boolean }>
     clear: () => Promise<{ success: boolean }>
   }
   'task-detail': {
@@ -159,7 +163,8 @@ const api: ElectronAPI = {
     onStarted: (callback) => createIPCListener('task:started', callback),
     onStopped: (callback) => createIPCListener('task:stopped', callback),
     onQueued: (callback) => createIPCListener('task:queued', callback),
-    onScheduleTriggered: (callback) => createIPCListener('task:scheduleTriggered', callback)
+    onScheduleTriggered: (callback) => createIPCListener('task:scheduleTriggered', callback),
+    onHistoryUpdate: (callback) => createIPCListener('task:historyUpdate', callback)
   },
   'feed-ac-settings': {
     get: () => ipcRenderer.invoke('feed-ac-settings:get'),
@@ -192,7 +197,8 @@ const api: ElectronAPI = {
     getByPlatform: (platform) => ipcRenderer.invoke('account:getByPlatform', platform),
     getActiveAccounts: () => ipcRenderer.invoke('account:getActiveAccounts'),
     checkStatus: (id) => ipcRenderer.invoke('account:check-status', id),
-    onStatusChanged: (callback) => createIPCListener('account:statusChanged', callback)
+    onStatusChanged: (callback) => createIPCListener('account:statusChanged', callback),
+    refreshInfo: (id) => ipcRenderer.invoke('account:refresh-info', id)
   },
   login: {
     douyin: () => ipcRenderer.invoke('login:douyin')
@@ -207,6 +213,8 @@ const api: ElectronAPI = {
     add: (record) => ipcRenderer.invoke('task-history:add', record),
     update: (id, updates) => ipcRenderer.invoke('task-history:update', id, updates),
     delete: (id) => ipcRenderer.invoke('task-history:delete', id),
+    deleteByTaskId: (taskId) => ipcRenderer.invoke('task-history:deleteByTaskId', taskId),
+    deleteBatch: (ids) => ipcRenderer.invoke('task-history:deleteBatch', ids),
     clear: () => ipcRenderer.invoke('task-history:clear')
   },
   'task-detail': {

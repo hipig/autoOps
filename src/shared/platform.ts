@@ -228,6 +228,7 @@ export interface VideoInfo {
   commentCount: number
   shareUrl: string
   createTime: number
+  duration?: number  // 视频时长（秒）
 }
 
 export interface CommentInfo {

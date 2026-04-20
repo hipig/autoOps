@@ -74,6 +74,13 @@ function getTaskManager(): TaskManager {
         win.webContents.send('task:scheduleTriggered', data)
       })
     })
+
+    taskManager.on('historyUpdate', (data: any) => {
+      const windows = BrowserWindow.getAllWindows()
+      windows.forEach((win) => {
+        win.webContents.send('task:historyUpdate', data)
+      })
+    })
   }
   return taskManager
 }

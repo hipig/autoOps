@@ -31,7 +31,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu'
-import { Plus, MoreVertical, Star, Trash2, UserCircle, LogIn, Loader2, RefreshCw, Shield, ShieldAlert, ShieldCheck, ShieldX } from 'lucide-vue-next'
+import { Plus, MoreVertical, Star, Trash2, UserCircle, LogIn, Loader2, RefreshCw, Shield, ShieldAlert, ShieldCheck, ShieldX, RotateCcw } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 import type { Platform } from '@../../shared/platform'
 
@@ -196,6 +196,21 @@ const handleCheckAllStatuses = async () => {
     isCheckingStatus.value = false
   }
 }
+
+const handleRefreshInfo = async (id: string) => {
+  toast.info('正在打开浏览器，请重新登录以更新账号信息...')
+  try {
+    const result = await window.api.account.refreshInfo(id)
+    if (result.success) {
+      await accountStore.loadAccounts()
+      toast.success('账号信息已更新')
+    } else {
+      toast.error(result.error || '更新失败')
+    }
+  } catch (error) {
+    toast.error('更新失败: ' + (error as Error).message)
+  }
+}
 </script>
 
 <template>
@@ -301,6 +316,10 @@ const handleCheckAllStatuses = async () => {
                     <DropdownMenuContent align="end">
                       <DropdownMenuLabel>操作</DropdownMenuLabel>
                       <DropdownMenuSeparator />
+                      <DropdownMenuItem @click="handleRefreshInfo(account.id)">
+                        <RotateCcw class="w-4 h-4 mr-2" />
+                        更新账号信息
+                      </DropdownMenuItem>
                       <DropdownMenuItem @click="handleCheckStatus(account.id)">
                         <RefreshCw class="w-4 h-4 mr-2" />
                         检查状态

@@ -38,6 +38,20 @@ export function registerTaskHistoryIPC(): void {
     return { success: true }
   })
 
+  ipcMain.handle('task-history:deleteByTaskId', async (_event, taskId: string) => {
+    const history = store.get(StorageKey.TASK_HISTORY) as TaskHistoryRecord[] || []
+    const filtered = history.filter((h) => h.taskId !== taskId)
+    store.set(StorageKey.TASK_HISTORY, filtered)
+    return { success: true }
+  })
+
+  ipcMain.handle('task-history:deleteBatch', async (_event, ids: string[]) => {
+    const history = store.get(StorageKey.TASK_HISTORY) as TaskHistoryRecord[] || []
+    const filtered = history.filter((h) => !ids.includes(h.id))
+    store.set(StorageKey.TASK_HISTORY, filtered)
+    return { success: true }
+  })
+
   ipcMain.handle('task-history:clear', async () => {
     store.set(StorageKey.TASK_HISTORY, [])
     return { success: true }

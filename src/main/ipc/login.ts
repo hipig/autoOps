@@ -17,6 +17,32 @@ interface LoginResult {
 
 async function extractNickname(page: any): Promise<string | null> {
   return page.evaluate(() => {
+    // 智能提取昵称
+    let nickname = ''
+
+    // 方法1: 从 data-e2e="user-info" 容器中提取 h1
+    const userInfoContainer = document.querySelector('[data-e2e="user-info"]')
+    if (userInfoContainer) {
+      const h1 = userInfoContainer.querySelector('h1')
+      if (h1) {
+        // 递归获取所有文本节点
+        const getText = (el: Element): string => {
+          let text = ''
+          el.childNodes.forEach(node => {
+            if (node.nodeType === Node.TEXT_NODE) {
+              text += node.textContent || ''
+            } else if (node.nodeType === Node.ELEMENT_NODE) {
+              text += getText(node as Element)
+            }
+          })
+          return text
+        }
+        nickname = getText(h1).trim()
+        if (nickname && nickname.length < 50) return nickname
+      }
+    }
+
+    // 方法2: 备用选择器
     const selectors = [
       '[data-e2e="profile-nickname"]',
       '[class*="nickname"]',
@@ -24,7 +50,10 @@ async function extractNickname(page: any): Promise<string | null> {
       '.author-name',
       '.profile-name',
       'a[href*="/user/"]',
-      '[class*="header"] [class*="name"]'
+      '[class*="header"] [class*="name"]',
+      '.account-card .name',
+      '.user-info .nickname',
+      'h1[class*="GMEdHsXq"]'
     ]
     for (const selector of selectors) {
       try {
@@ -37,6 +66,17 @@ async function extractNickname(page: any): Promise<string | null> {
         }
       } catch {}
     }
+
+    // 方法3: 从页面标题提取
+    const title = document.title
+    if (title && !title.includes('抖音') && !title.includes('登录')) {
+      const match = title.match(/^([^-_|]+)/)
+      if (match && match[1].trim().length < 50) {
+        return match[1].trim()
+      }
+    }
+
+    // 方法4: 从 URL 提取
     const url = window.location.href
     if (url.includes('/user/')) {
       const match = url.match(/\/user\/([^/?#]+)/)
@@ -68,6 +108,14 @@ async function extractAvatar(page: any): Promise<string | undefined> {
 
 async function extractUniqueId(page: any): Promise<string | undefined> {
   return page.evaluate(() => {
+    // 方法1: 从文本中提取 "抖音号：xxx"
+    const douyinIdText = document.body.innerText
+    const douyinIdMatch = douyinIdText.match(/抖音号[：:]\s*([a-zA-Z0-9_-]+)/)
+    if (douyinIdMatch) {
+      return douyinIdMatch[1]
+    }
+
+    // 方法2: 从 URL 提取
     const url = window.location.href
     const patterns = [
       /\/user\/([^/?#]+)/,
@@ -76,7 +124,7 @@ async function extractUniqueId(page: any): Promise<string | undefined> {
     ]
     for (const pattern of patterns) {
       const match = url.match(pattern)
-      if (match) return match[1]
+      if (match && match[1] !== 'self') return match[1]
     }
     return undefined
   })
@@ -120,7 +168,19 @@ export function registerLoginIPC(): void {
         log.info('[Login] URL wait timeout, checking current state...')
       }
 
-      await page.waitForTimeout(2000)
+      await page.waitForTimeout(3000)
+
+      // 尝试导航到个人主页以获取更准确的信息
+      try {
+        const currentUrl = page.url()
+        if (!currentUrl.includes('/user/')) {
+          log.info('[Login] Navigating to user profile page...')
+          await page.goto('https://www.douyin.com/user/self', { waitUntil: 'domcontentloaded', timeout: 30000 })
+          await page.waitForTimeout(2000)
+        }
+      } catch (e) {
+        log.info('[Login] Failed to navigate to profile, continuing with current page')
+      }
 
       let userInfo: LoginResult['userInfo'] = undefined
 

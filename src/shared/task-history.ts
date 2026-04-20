@@ -1,3 +1,15 @@
+export interface LogEntry {
+  timestamp: number
+  level: 'info' | 'warn' | 'error'
+  message: string
+  data?: {
+    comments?: Array<{ content: string; likeCount: number }>
+    llmAnalysis?: { prompt: string; response: string }
+    generatedComment?: string
+    [key: string]: unknown
+  }
+}
+
 export interface VideoRecord {
   videoId: string
   authorName: string
@@ -13,6 +25,17 @@ export interface VideoRecord {
   commentText?: string
   skipReason?: string
   timestamp: number
+  // AI分析相关
+  aiFilterResult?: {
+    matched: boolean
+    reason: string
+    prompt?: string
+  }
+  aiCommentResult?: {
+    comment: string
+    topComments?: Array<{ content: string; likeCount: number }>
+    prompt?: string
+  }
 }
 
 export interface TaskHistoryRecord {
@@ -30,6 +53,7 @@ export interface TaskHistoryRecord {
   followCount: number
   videoRecords: VideoRecord[]
   settings: Record<string, unknown>
+  logs: LogEntry[]
 }
 
 export function getDefaultTaskHistory(): TaskHistoryRecord[] {

@@ -12,11 +12,11 @@ import StatusBar from './StatusBar.vue'
 <template>
   <SidebarProvider>
     <AppSidebar />
-    <SidebarInset>
+    <SidebarInset class="flex flex-col h-screen overflow-hidden">
       <main class="flex-1 overflow-auto">
         <RouterView />
       </main>
-      <StatusBar />
+      <StatusBar class="flex-shrink-0" />
     </SidebarInset>
   </SidebarProvider>
 </template>

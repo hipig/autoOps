@@ -3,6 +3,13 @@ export interface AIAnalysisResult {
   reason?: string
 }
 
+export interface AIFilterContext {
+  videoDesc: string
+  videoTags: string[]
+  topComments?: Array<{ content: string; likeCount: number }>
+  targetCategories: string[]
+}
+
 export interface AICommentContext {
   author: string
   videoDesc: string
@@ -14,6 +21,7 @@ export interface AICommentOptions {
   style?: 'humorous' | 'serious' | 'question' | 'praise' | 'mixed'
   maxLength?: number
   customPrompt?: string
+  systemPrompt?: string
 }
 
 export interface AICommentResult {
@@ -22,6 +30,7 @@ export interface AICommentResult {
 
 export interface AIService {
   analyzeVideoType(videoInfo: string, customPrompt: string): Promise<AIAnalysisResult>
+  analyzeVideoCategory(context: AIFilterContext, customPrompt?: string): Promise<AIAnalysisResult>
   generateComment(context: AICommentContext | string, optionsOrPrompt: AICommentOptions | string): Promise<AICommentResult>
 }
 
@@ -59,6 +68,41 @@ export abstract class BaseAIService implements AIService {
     }
   }
 
+  async analyzeVideoCategory(context: AIFilterContext, customPrompt?: string): Promise<AIAnalysisResult> {
+    const defaultPrompt = customPrompt || '判断这个视频是否属于目标分类。请综合考虑视频描述、标签和热门评论的内容。'
+
+    const systemPrompt = `你是一个视频分类筛选助手。根据视频信息判断该视频是否属于目标分类。
+${defaultPrompt}
+目标分类：${context.targetCategories.join('、')}
+请返回JSON格式：{"shouldWatch": true/false, "reason": "判断理由"}`
+
+    let userPrompt = ''
+    if (context.videoDesc) userPrompt += `视频描述: ${context.videoDesc}\n`
+    if (context.videoTags && context.videoTags.length > 0) {
+      userPrompt += `视频标签: ${context.videoTags.join(', ')}\n`
+    }
+
+    if (context.topComments && context.topComments.length > 0) {
+      userPrompt += `\n热门评论参考:\n`
+      context.topComments.forEach((c, i) => {
+        userPrompt += `${i + 1}. [${c.likeCount}赞] ${c.content}\n`
+      })
+    }
+
+    try {
+      const result = await this.request(userPrompt, systemPrompt)
+      if (!result) return { shouldWatch: false, reason: 'AI请求失败' }
+
+      const parsed = JSON.parse(result.replace(/```json\n?/g, '').replace(/```\n?/g, ''))
+      return {
+        shouldWatch: parsed.shouldWatch === true,
+        reason: parsed.reason || ''
+      }
+    } catch (e) {
+      return { shouldWatch: false, reason: `解析失败: ${e}` }
+    }
+  }
+
   async generateComment(context: AICommentContext | string, optionsOrPrompt: AICommentOptions | string): Promise<AICommentResult> {
     // 兼容旧版调用方式：直接传字符串
     const ctx: AICommentContext = typeof context === 'string'
@@ -73,24 +117,25 @@ export abstract class BaseAIService implements AIService {
     const maxLength = options.maxLength || 50
 
     const styleInstructions: Record<string, string> = {
-      humorous: '你的评论风格幽默风趣，善于用轻松的方式表达观点，喜欢用一些俏皮话和网络梗。',
-      serious: '你的评论风格认真专业，会给出建设性的意见或真诚的称赞。',
-      question: '你的评论风格是提问式，会对视频内容提出有趣的问题来引导互动。',
-      praise: '你的评论风格是真诚赞美，会表达对视频内容的喜爱和认可。',
-      mixed: '你的评论风格多变，可以幽默、提问或赞美，根据视频内容灵活变化。'
+      humorous: '幽默风趣，善于用轻松的方式表达观点，可以使用俏皮话和网络梗',
+      serious: '认真专业，给出建设性的意见或真诚的称赞',
+      question: '提问式，对视频内容提出有趣的问题来引导互动',
+      praise: '真诚赞美，表达对视频内容的喜爱和认可',
+      mixed: '风格多变，可以幽默、提问或赞美，根据视频内容灵活变化'
     }
 
-    const systemPrompt = `你是一个抖音网友，喜欢发表有趣、简短、有创意的评论。
+    // 使用自定义系统提示词或默认提示词
+    const systemPrompt = options.systemPrompt || `你是一个抖音网友，根据视频内容生成简短、自然、有创意的评论。
+
 要求：
-- 评论长度控制在15-${maxLength}字
+- 评论长度15-${maxLength}字
 - 口语化、通俗易懂
-- 可以适当使用emoji
+- 可适当使用emoji
 - 语气轻松活泼
-- 不要太长，简洁有力
-- 直接输出评论内容，不要加引号或其他格式
-- ${styleInstructions[style] || styleInstructions.mixed}
-- 参考该视频的热门评论风格和话题，生成符合当前评论区氛围的评论
-- 不要简单复制热门评论，要融入自己的理解
+- 简洁有力
+- 直接输出评论内容，不要加引号
+- 风格：${styleInstructions[style] || styleInstructions.mixed}
+- 参考热门评论的风格和话题，融入自己的理解，不要简单复制
 - 每次生成不同风格和角度的评论，避免重复`
 
     let userPrompt = ''
@@ -106,7 +151,7 @@ export abstract class BaseAIService implements AIService {
       ctx.topComments.forEach((c, i) => {
         userPrompt += `${i + 1}. [${c.likeCount}赞] ${c.content}\n`
       })
-      userPrompt += `\n请参考以上热门评论的风格和话题，但不要求复制，生成一条新的评论。\n`
+      userPrompt += `\n请参考以上热门评论的风格和话题，但不要复制，生成一条新的评论。\n`
     }
 
     if (options.customPrompt) {

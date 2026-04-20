@@ -44,6 +44,8 @@ export interface VideoCategoryConfig {
   categories: string[]       // 预定义分类
   customKeywords: string[]   // 自定义关键词
   useAI: boolean             // 是否使用AI分析
+  prioritizeAI: boolean      // 优先使用AI判断（而非关键词）
+  aiPrompt?: string          // AI分析提示词
 }
 
 export const PRESET_CATEGORIES = [
@@ -58,7 +60,9 @@ export function getDefaultVideoCategoryConfig(): VideoCategoryConfig {
     mode: 'whitelist',
     categories: [],
     customKeywords: [],
-    useAI: false
+    useAI: false,
+    prioritizeAI: true,
+    aiPrompt: '判断这个视频是否属于目标分类。请综合考虑视频描述、标签和热门评论的内容。'
   }
 }
 
@@ -74,6 +78,8 @@ export interface FeedAcSettingsV3 {
   authorBlockKeywords: string[]
   simulateWatchBeforeComment: boolean
   watchTimeRangeSeconds: [number, number]
+  watchTimeMode?: 'fixed' | 'percentage'  // 观看时长模式：固定时长或视频百分比
+  watchTimePercentageRange?: [number, number]  // 视频时长百分比范围 [0.1, 0.5] 表示 10%-50%
   onlyCommentActiveVideo: boolean
   /**
    * 目标操作数：
@@ -99,11 +105,12 @@ export interface FeedAcSettingsV3 {
   skipImageSet: boolean          // 自动跳过图集（默认 false）
   // 视频切换控制
   maxConsecutiveSkips: number    // 连续跳过最大次数（默认 20），超过后暂停任务
-  videoSwitchWaitMs: number      // 切换视频后等待时间(ms)（默认 2000）
+  videoSwitchWaitRange: [number, number]  // 切换视频后等待时间范围(秒)（默认 [5, 10]）
   // AI评论控制
   commentReferenceCount: number  // AI评论参考热门评论条数（默认 5）
   commentStyle: CommentStyle     // 评论风格（默认 mixed）
   commentMaxLength: number       // 评论最大字数（默认 50）
+  commentSystemPrompt?: string   // 评论生成系统提示词（可自定义）
   // 视频分类筛选
   videoCategories: VideoCategoryConfig
 }
@@ -116,7 +123,7 @@ export function getDefaultFeedAcSettings(): FeedAcSettingsV2 {
     ruleGroups: [],
     blockKeywords: [],
     authorBlockKeywords: [],
-    simulateWatchBeforeComment: false,
+    simulateWatchBeforeComment: true,
     watchTimeRangeSeconds: [5, 15],
     onlyCommentActiveVideo: false,
     maxCount: 10,
@@ -131,8 +138,10 @@ export function getDefaultFeedAcSettingsV3(): FeedAcSettingsV3 {
     ruleGroups: [],
     blockKeywords: [],
     authorBlockKeywords: [],
-    simulateWatchBeforeComment: false,
+    simulateWatchBeforeComment: true,
     watchTimeRangeSeconds: [5, 15],
+    watchTimeMode: 'fixed',
+    watchTimePercentageRange: [0.2, 0.5],
     onlyCommentActiveVideo: false,
     maxCount: 10,
     aiCommentEnabled: false,
@@ -149,7 +158,7 @@ export function getDefaultFeedAcSettingsV3(): FeedAcSettingsV3 {
     skipLiveVideo: true,
     skipImageSet: false,
     maxConsecutiveSkips: 20,
-    videoSwitchWaitMs: 2000,
+    videoSwitchWaitRange: [5, 10],
     commentReferenceCount: 5,
     commentStyle: 'mixed',
     commentMaxLength: 50,
@@ -159,11 +168,13 @@ export function getDefaultFeedAcSettingsV3(): FeedAcSettingsV3 {
 
 export function migrateToV3(settings: FeedAcSettingsV2): FeedAcSettingsV3 {
   // 注意：taskType 由调用方在 Task 层面设置，不再存储在 config 中
-  
+
   return {
     ...settings,
     version: 'v3',
     // taskType 已移除，由 Task.taskType 作为唯一来源
+    watchTimeMode: 'fixed',
+    watchTimePercentageRange: [0.2, 0.5],
     operations: [
       {
         type: 'comment',
@@ -179,7 +190,7 @@ export function migrateToV3(settings: FeedAcSettingsV2): FeedAcSettingsV3 {
     skipLiveVideo: true,
     skipImageSet: false,
     maxConsecutiveSkips: 20,
-    videoSwitchWaitMs: 2000,
+    videoSwitchWaitRange: [5, 10],
     commentReferenceCount: 5,
     commentStyle: 'mixed',
     commentMaxLength: 50,

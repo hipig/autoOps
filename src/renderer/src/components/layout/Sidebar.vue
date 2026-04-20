@@ -41,8 +41,6 @@ const navigate = (path: string) => {
 
 <template>
   <Sidebar collapsible="icon">
-    <SidebarHeader>
-    </SidebarHeader>
     <SidebarContent>
       <SidebarGroup>
         <SidebarGroupContent>
