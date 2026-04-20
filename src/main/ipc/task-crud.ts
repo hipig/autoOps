@@ -30,13 +30,14 @@ export function registerTaskIPC(): void {
   ipcMain.handle('task:create', async (_event, data: { name: string; accountId: string; platform?: Platform; taskType?: TaskType; config?: Task['config'] }) => {
     try {
       const tasks = store.get(StorageKey.TASKS) as Task[] || []
+      const taskType = data.taskType || 'comment'
       const newTask: Task = {
         id: generateTaskId(),
         name: data.name,
         accountId: data.accountId,
         platform: data.platform || 'douyin',
-        taskType: data.taskType || 'comment',
-        config: data.config || getDefaultFeedAcSettingsV3(),
+        taskType,
+        config: data.config || getDefaultFeedAcSettingsV3(taskType),
         createdAt: Date.now(),
         updatedAt: Date.now()
       }

@@ -232,37 +232,8 @@ export class TaskManager extends EventEmitter {
 
     // 任务停止后清理
     runner.on('stopped', () => {
-      // 构建并保存历史记录
-      try {
-        const crudTaskId = (runner as any).crudTaskId || ''
-        const taskNameFromRunner = (runner as any).taskName || '未命名任务'
-        const accountId = config.accountId || ''
-        const platform = config.platform
-
-        const historyRecord = runner.buildHistoryRecord(
-          crudTaskId,
-          taskNameFromRunner,
-          accountId,
-          platform
-        )
-
-        // 读取现有历史并添加新记录
-        const existingHistory = store.get(StorageKey.TASK_HISTORY) as TaskHistoryRecord[] | null || []
-        const existingIndex = existingHistory.findIndex(h => h.id === historyRecord.id)
-
-        if (existingIndex >= 0) {
-          // 更新现有记录
-          existingHistory[existingIndex] = historyRecord
-        } else {
-          // 添加新记录
-          existingHistory.unshift(historyRecord)
-        }
-
-        store.set(StorageKey.TASK_HISTORY, existingHistory)
-        log.info(`[TaskManager] Task history saved: ${historyRecord.id}`)
-      } catch (err) {
-        log.error('[TaskManager] Failed to save task history:', err)
-      }
+      // 构建并保存历史记录（最终状态）
+      this.saveTaskHistory(runner, taskId)
 
       this.runners.delete(taskId)
       log.info(`[TaskManager] Task ${taskId} stopped, remaining: ${this.runners.size}`)
@@ -301,10 +272,8 @@ export class TaskManager extends EventEmitter {
       return { success: false, error: 'Task already paused' }
     }
     await runner.pause()
-    // 暂停时保存历史记录（状态仍为 running）
-    setTimeout(() => {
-      this.saveTaskHistory(runner, taskId)
-    }, 100)
+    // 暂停后立即保存历史记录（状态为 paused）
+    this.saveTaskHistory(runner, taskId)
     return { success: true }
   }
 
@@ -320,6 +289,7 @@ export class TaskManager extends EventEmitter {
       return { success: false, error: 'Task is not paused' }
     }
     await runner.resume()
+    this.saveTaskHistory(runner, taskId)
     return { success: true }
   }
 
@@ -367,6 +337,8 @@ export class TaskManager extends EventEmitter {
 
       store.set(StorageKey.TASK_HISTORY, existingHistory)
       log.info(`[TaskManager] Task history saved: ${historyRecord.id}`)
+      // 通知前端历史记录已更新，触发列表刷新
+      this.emit('historyUpdate', { taskId, status: historyRecord.status })
     } catch (err) {
       log.error('[TaskManager] Failed to save task history:', err)
     }

@@ -72,7 +72,7 @@ export interface FeedAcSettingsV3 {
    * @deprecated 此字段已废弃，任务类型由 Task.taskType 唯一确定
    * 保留此字段仅为向后兼容旧数据，新代码请勿使用
    */
-  taskType?: 'comment' | 'like' | 'collect' | 'follow' | 'watch' | 'combo'
+  taskType?: 'comment' | 'like' | 'collect' | 'follow' | 'combo'
   ruleGroups: FeedAcRuleGroups[]
   blockKeywords: string[]
   authorBlockKeywords: string[]
@@ -90,7 +90,7 @@ export interface FeedAcSettingsV3 {
   aiCommentEnabled: boolean
   aiStyle?: string
   operations: Array<{
-    type: 'comment' | 'like' | 'collect' | 'follow' | 'watch'
+    type: 'comment' | 'like' | 'collect' | 'follow'
     enabled: boolean
     probability: number
     maxCount?: number
@@ -131,10 +131,31 @@ export function getDefaultFeedAcSettings(): FeedAcSettingsV2 {
   }
 }
 
-export function getDefaultFeedAcSettingsV3(): FeedAcSettingsV3 {
+export function getDefaultFeedAcSettingsV3(taskType?: 'comment' | 'like' | 'collect' | 'follow' | 'combo'): FeedAcSettingsV3 {
+  let operations: FeedAcSettingsV3['operations'] = []
+
+  if (taskType === 'combo') {
+    // 组合任务：包含所有操作类型
+    operations = [
+      { type: 'comment', enabled: true, probability: 0.5, commentTexts: [], aiEnabled: false },
+      { type: 'like', enabled: true, probability: 0.8, aiEnabled: false },
+      { type: 'collect', enabled: false, probability: 0.3, aiEnabled: false },
+      { type: 'follow', enabled: false, probability: 0.2, aiEnabled: false }
+    ]
+  } else {
+    // 单一任务类型：只包含对应的操作
+    const opType = taskType || 'comment'
+    operations = [{
+      type: opType as any,
+      enabled: true,
+      probability: 1.0,
+      commentTexts: opType === 'comment' ? [] : undefined,
+      aiEnabled: false
+    }]
+  }
+
   return {
     version: 'v3',
-    // taskType 已移除，由 Task.taskType 作为唯一来源
     ruleGroups: [],
     blockKeywords: [],
     authorBlockKeywords: [],
@@ -145,15 +166,7 @@ export function getDefaultFeedAcSettingsV3(): FeedAcSettingsV3 {
     onlyCommentActiveVideo: false,
     maxCount: 10,
     aiCommentEnabled: false,
-    operations: [
-      {
-        type: 'comment',
-        enabled: true,
-        probability: 1.0,
-        commentTexts: [],
-        aiEnabled: false
-      }
-    ],
+    operations,
     skipAdVideo: true,
     skipLiveVideo: true,
     skipImageSet: false,

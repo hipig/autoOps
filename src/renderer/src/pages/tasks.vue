@@ -7,8 +7,10 @@ import { Label } from '@/components/ui/label'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Slider } from '@/components/ui/slider'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Badge } from '@/components/ui/badge'
+import { Separator } from '@/components/ui/separator'
 
 import {
   Dialog,
@@ -53,7 +55,6 @@ import {
   ThumbsUp,
   Bookmark,
   UserPlus,
-  Eye,
   Pause,
   RotateCcw,
   Timer,
@@ -90,15 +91,47 @@ const newTaskType = ref<TaskType>('comment')
 const templateName = ref('')
 
 const editingTask = ref<Task | null>(null)
-const taskSettings = ref<FeedAcSettingsV3>(getDefaultFeedAcSettingsV3())
+const taskSettings = ref<FeedAcSettingsV3>(getDefaultFeedAcSettingsV3('comment'))
 
 const selectedTaskType = ref<TaskType>('comment')
-const operationConfigs = ref([
-  { type: 'comment' as const, enabled: true, probability: 1.0, commentTexts: [''], aiEnabled: false },
-  { type: 'like' as const, enabled: false, probability: 0.3 },
-  { type: 'collect' as const, enabled: false, probability: 0.3 },
-  { type: 'follow' as const, enabled: false, probability: 0.2 }
-])
+
+// 根据任务类型获取当前操作配置
+const currentOperation = computed(() => {
+  if (selectedTaskType.value === 'combo') {
+    return null // 组合任务使用 operations 数组
+  }
+  const op = taskSettings.value.operations.find(op => op.type === selectedTaskType.value)
+  if (op) {
+    // 确保评论操作有commentTexts数组
+    if (op.type === 'comment' && !op.commentTexts) {
+      op.commentTexts = []
+    }
+    return op
+  }
+  return {
+    type: selectedTaskType.value,
+    enabled: true,
+    probability: 1.0,
+    commentTexts: selectedTaskType.value === 'comment' ? [] : undefined,
+    aiEnabled: false
+  }
+})
+
+// 确保操作配置存在
+function ensureOperationConfig() {
+  if (selectedTaskType.value === 'combo') return
+
+  const existingOp = taskSettings.value.operations.find(op => op.type === selectedTaskType.value)
+  if (!existingOp) {
+    taskSettings.value.operations.push({
+      type: selectedTaskType.value as any,
+      enabled: true,
+      probability: 1.0,
+      commentTexts: selectedTaskType.value === 'comment' ? [] : undefined,
+      aiEnabled: false
+    })
+  }
+}
 
 const newRuleGroup = ref<Partial<FeedAcRuleGroups>>({
   type: 'manual',
@@ -107,6 +140,7 @@ const newRuleGroup = ref<Partial<FeedAcRuleGroups>>({
   commentTexts: ['']
 })
 
+const activeComboTab = ref('comment')
 const newBlockKeyword = ref('')
 const newAuthorBlockKeyword = ref('')
 const newCustomCategoryKeyword = ref('')
@@ -172,10 +206,12 @@ watch(selectedTask, (task) => {
   if (task) {
     editingTask.value = { ...task }
     const config = task.config as any
+    const taskType = (task as any).taskType || 'comment'
+
     if (config.version === 'v2') {
       taskSettings.value = migrateToV3(config)
     } else {
-      taskSettings.value = { ...getDefaultFeedAcSettingsV3(), ...config }
+      taskSettings.value = { ...getDefaultFeedAcSettingsV3(taskType), ...config }
       // 确保 videoCategories 存在并有完整字段
       if (!taskSettings.value.videoCategories) {
         taskSettings.value.videoCategories = {
@@ -197,7 +233,8 @@ watch(selectedTask, (task) => {
         }
       }
     }
-    selectedTaskType.value = (task as any).taskType || 'comment'
+    selectedTaskType.value = taskType
+    ensureOperationConfig()
   } else {
     editingTask.value = null
   }
@@ -443,6 +480,27 @@ function togglePresetCategory(cat: string) {
   }
 }
 
+function addOperation() {
+  // 找出还未添加的操作类型
+  const allTypes: Array<'comment' | 'like' | 'collect' | 'follow'> = ['comment', 'like', 'collect', 'follow']
+  const existingTypes = taskSettings.value.operations.map(op => op.type)
+  const availableTypes = allTypes.filter(t => !existingTypes.includes(t))
+
+  if (availableTypes.length === 0) {
+    toast.info('所有操作类型已添加')
+    return
+  }
+
+  const newType = availableTypes[0]
+  taskSettings.value.operations.push({
+    type: newType,
+    enabled: false,
+    probability: 0.5,
+    commentTexts: newType === 'comment' ? [] : undefined,
+    aiEnabled: false
+  })
+}
+
 function formatTime(timestamp: number): string {
   return new Date(timestamp).toLocaleString('zh-CN')
 }
@@ -686,10 +744,10 @@ function getTaskName(taskId: string): string {
               </DropdownMenu>
             </div>
           </div>
-          <div :class="['text-xs mt-1', selectedTaskId === task.id ? 'text-primary/80' : 'text-muted-foreground']">
+          <div :class="['text-xs mt-1', selectedTaskId === task.id ? 'text-primary-foreground/80' : 'text-muted-foreground']">
             {{ getAccountName(task.accountId) }}
           </div>
-          <div v-if="task.schedule?.enabled" class="text-xs mt-1 flex items-center gap-1" :class="selectedTaskId === task.id ? 'text-primary/70' : 'text-orange-500'">
+          <div v-if="task.schedule?.enabled" class="text-xs mt-1 flex items-center gap-1" :class="selectedTaskId === task.id ? 'text-primary-foreground/70' : 'text-orange-500'">
             <Timer class="w-3 h-3" /> {{ task.schedule.cron }}
           </div>
         </div>
@@ -758,6 +816,15 @@ function getTaskName(taskId: string): string {
               <CardTitle>基础设置</CardTitle>
             </CardHeader>
             <CardContent class="space-y-4">
+              <div class="font-medium text-sm text-muted-foreground">任务目标</div>
+              <div class="space-y-2">
+                <Label>目标操作数</Label>
+                <Input type="number" v-model.number="taskSettings.maxCount" />
+              </div>
+
+              <Separator />
+
+              <div class="font-medium text-sm text-muted-foreground">行为模拟</div>
               <div class="flex items-center justify-between">
                 <Label>模拟观看</Label>
                 <Switch v-model="taskSettings.simulateWatchBeforeComment" />
@@ -807,16 +874,9 @@ function getTaskName(taskId: string): string {
                 <p class="text-sm text-muted-foreground">根据视频实际时长的百分比来观看，例如 20%-50% 表示观看视频时长的 20% 到 50%</p>
               </div>
 
-              <div class="flex items-center justify-between">
-                <Label>仅评论活跃视频</Label>
-                <Switch v-model="taskSettings.onlyCommentActiveVideo" />
-              </div>
+              <Separator />
 
-              <div class="space-y-2">
-                <Label>目标操作数</Label>
-                <Input type="number" v-model.number="taskSettings.maxCount" />
-              </div>
-
+              <div class="font-medium text-sm text-muted-foreground">安全控制</div>
               <div class="space-y-2">
                 <Label>视频切换等待时间范围（秒）</Label>
                 <div class="flex gap-2">
@@ -837,221 +897,222 @@ function getTaskName(taskId: string): string {
 
           <Card>
             <CardHeader>
-              <CardTitle>视频类型过滤</CardTitle>
+              <CardTitle>视频过滤设置</CardTitle>
+              <CardDescription>决定哪些视频会被跳过</CardDescription>
             </CardHeader>
-            <CardContent class="space-y-4">
-              <div class="flex items-center justify-between">
-                <div>
-                  <Label>跳过广告视频</Label>
-                  <p class="text-xs text-muted-foreground">自动跳过Feed中的广告内容</p>
-                </div>
-                <Switch v-model="taskSettings.skipAdVideo" />
-              </div>
+            <CardContent>
+              <Tabs default-value="type-filter" class="w-full">
+                <TabsList class="grid w-full grid-cols-3">
+                  <TabsTrigger value="type-filter">类型过滤</TabsTrigger>
+                  <TabsTrigger value="block-words">屏蔽词</TabsTrigger>
+                  <TabsTrigger value="category-filter">分类筛选</TabsTrigger>
+                </TabsList>
 
-              <div class="flex items-center justify-between">
-                <div>
-                  <Label>跳过直播视频</Label>
-                  <p class="text-xs text-muted-foreground">自动跳过直播内容</p>
-                </div>
-                <Switch v-model="taskSettings.skipLiveVideo" />
-              </div>
-
-              <div class="flex items-center justify-between">
-                <div>
-                  <Label>跳过图集</Label>
-                  <p class="text-xs text-muted-foreground">自动跳过图片图集内容</p>
-                </div>
-                <Switch v-model="taskSettings.skipImageSet" />
-              </div>
-            </CardContent>
-          </Card>
-
-          <!-- 视频分类筛选 -->
-          <Card>
-            <CardHeader>
-              <div class="flex items-center justify-between">
-                <div>
-                  <CardTitle>视频分类筛选</CardTitle>
-                  <CardDescription>指定只操作特定分类的视频</CardDescription>
-                </div>
-                <Switch v-model="taskSettings.videoCategories.enabled" />
-              </div>
-            </CardHeader>
-            <CardContent v-if="taskSettings.videoCategories.enabled" class="space-y-4">
-              <div class="space-y-2">
-                <Label>筛选模式</Label>
-                <Select v-model="taskSettings.videoCategories.mode">
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="whitelist">白名单（只操作匹配的视频）</SelectItem>
-                    <SelectItem value="blacklist">黑名单（跳过匹配的视频）</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div class="space-y-2">
-                <Label>预定义分类</Label>
-                <div class="flex flex-wrap gap-2">
-                  <Badge
-                    v-for="cat in PRESET_CATEGORIES"
-                    :key="cat"
-                    :variant="taskSettings.videoCategories.categories.includes(cat) ? 'default' : 'outline'"
-                    class="cursor-pointer"
-                    @click="togglePresetCategory(cat)"
-                  >
-                    {{ cat }}
-                  </Badge>
-                </div>
-                <p class="text-xs text-muted-foreground">点击选择/取消分类</p>
-              </div>
-
-              <div class="space-y-2">
-                <Label>自定义关键词</Label>
-                <div class="flex gap-2">
-                  <Input v-model="newCustomCategoryKeyword" placeholder="输入关键词" @keyup.enter="addCustomCategoryKeyword" />
-                  <Button size="sm" @click="addCustomCategoryKeyword">添加</Button>
-                </div>
-                <div class="flex flex-wrap gap-2">
-                  <Badge v-for="(kw, index) in taskSettings.videoCategories.customKeywords" :key="index" variant="secondary">
-                    {{ kw }}
-                    <button @click="removeCustomCategoryKeyword(index)" class="ml-1 hover:text-destructive">×</button>
-                  </Badge>
-                </div>
-              </div>
-
-              <div class="flex items-center justify-between">
-                <div>
-                  <Label>启用 AI 分析</Label>
-                  <p class="text-xs text-muted-foreground">使用 AI 判断视频是否属于目标分类</p>
-                </div>
-                <Switch v-model="taskSettings.videoCategories.useAI" />
-              </div>
-
-              <div v-if="taskSettings.videoCategories.useAI" class="space-y-2">
-                <div class="flex items-center justify-between">
-                  <div>
-                    <Label>优先使用 AI 判断</Label>
-                    <p class="text-xs text-muted-foreground">优先使用 AI 而非关键词匹配（推荐）</p>
+                <TabsContent value="type-filter" class="space-y-4 mt-4">
+                  <div class="flex items-center justify-between">
+                    <div>
+                      <Label>跳过广告视频</Label>
+                      <p class="text-xs text-muted-foreground">自动跳过Feed中的广告内容</p>
+                    </div>
+                    <Switch v-model="taskSettings.skipAdVideo" />
                   </div>
-                  <Switch v-model="taskSettings.videoCategories.prioritizeAI" />
-                </div>
 
-                <div class="space-y-2">
-                  <Label>AI 分析提示词</Label>
-                  <Input
-                    v-model="taskSettings.videoCategories.aiPrompt"
-                    placeholder="自定义 AI 分析提示词（可选）"
-                  />
-                  <p class="text-xs text-muted-foreground">
-                    AI 将根据此提示词、视频描述、标签和热门评论来判断视频是否属于目标分类
-                  </p>
-                </div>
-              </div>
+                  <div class="flex items-center justify-between">
+                    <div>
+                      <Label>跳过直播视频</Label>
+                      <p class="text-xs text-muted-foreground">自动跳过直播内容</p>
+                    </div>
+                    <Switch v-model="taskSettings.skipLiveVideo" />
+                  </div>
+
+                  <div class="flex items-center justify-between">
+                    <div>
+                      <Label>跳过图集</Label>
+                      <p class="text-xs text-muted-foreground">自动跳过图片图集内容</p>
+                    </div>
+                    <Switch v-model="taskSettings.skipImageSet" />
+                  </div>
+
+                  <div class="flex items-center justify-between">
+                    <div>
+                      <Label>仅操作活跃视频</Label>
+                      <p class="text-xs text-muted-foreground">跳过互动量较低的视频</p>
+                    </div>
+                    <Switch v-model="taskSettings.onlyCommentActiveVideo" />
+                  </div>
+                </TabsContent>
+
+                <TabsContent value="block-words" class="space-y-4 mt-4">
+                  <div class="space-y-2">
+                    <Label>视频描述屏蔽词</Label>
+                    <div class="flex gap-2">
+                      <Input v-model="newBlockKeyword" placeholder="输入屏蔽词" @keyup.enter="addBlockKeyword" />
+                      <Button @click="addBlockKeyword">添加</Button>
+                    </div>
+                    <div class="flex flex-wrap gap-2">
+                      <Badge v-for="(keyword, index) in taskSettings.blockKeywords" :key="index" variant="secondary">
+                        {{ keyword }}
+                        <button @click="removeBlockKeyword(index)" class="ml-1 hover:text-destructive">×</button>
+                      </Badge>
+                    </div>
+                  </div>
+
+                  <div class="space-y-2">
+                    <Label>作者名屏蔽词</Label>
+                    <div class="flex gap-2">
+                      <Input v-model="newAuthorBlockKeyword" placeholder="输入屏蔽词" @keyup.enter="addAuthorBlockKeyword" />
+                      <Button @click="addAuthorBlockKeyword">添加</Button>
+                    </div>
+                    <div class="flex flex-wrap gap-2">
+                      <Badge v-for="(keyword, index) in taskSettings.authorBlockKeywords" :key="index" variant="secondary">
+                        {{ keyword }}
+                        <button @click="removeAuthorBlockKeyword(index)" class="ml-1 hover:text-destructive">×</button>
+                      </Badge>
+                    </div>
+                  </div>
+                </TabsContent>
+
+                <TabsContent value="category-filter" class="space-y-4 mt-4">
+                  <div class="flex items-center justify-between">
+                    <div>
+                      <Label>启用分类筛选</Label>
+                      <p class="text-xs text-muted-foreground">指定只操作特定分类的视频</p>
+                    </div>
+                    <Switch v-model="taskSettings.videoCategories.enabled" />
+                  </div>
+
+                  <template v-if="taskSettings.videoCategories.enabled">
+                    <div class="space-y-2">
+                      <Label>筛选模式</Label>
+                      <Select v-model="taskSettings.videoCategories.mode">
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="whitelist">白名单（只操作匹配的视频）</SelectItem>
+                          <SelectItem value="blacklist">黑名单（跳过匹配的视频）</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    <div class="space-y-2">
+                      <Label>预定义分类</Label>
+                      <div class="flex flex-wrap gap-2">
+                        <Badge
+                          v-for="cat in PRESET_CATEGORIES"
+                          :key="cat"
+                          :variant="taskSettings.videoCategories.categories.includes(cat) ? 'default' : 'outline'"
+                          class="cursor-pointer"
+                          @click="togglePresetCategory(cat)"
+                        >
+                          {{ cat }}
+                        </Badge>
+                      </div>
+                      <p class="text-xs text-muted-foreground">点击选择/取消分类</p>
+                    </div>
+
+                    <div class="space-y-2">
+                      <Label>自定义关键词</Label>
+                      <div class="flex gap-2">
+                        <Input v-model="newCustomCategoryKeyword" placeholder="输入关键词" @keyup.enter="addCustomCategoryKeyword" />
+                        <Button size="sm" @click="addCustomCategoryKeyword">添加</Button>
+                      </div>
+                      <div class="flex flex-wrap gap-2">
+                        <Badge v-for="(kw, index) in taskSettings.videoCategories.customKeywords" :key="index" variant="secondary">
+                          {{ kw }}
+                          <button @click="removeCustomCategoryKeyword(index)" class="ml-1 hover:text-destructive">×</button>
+                        </Badge>
+                      </div>
+                    </div>
+
+                    <div class="flex items-center justify-between">
+                      <div>
+                        <Label>启用 AI 分析</Label>
+                        <p class="text-xs text-muted-foreground">使用 AI 判断视频是否属于目标分类</p>
+                      </div>
+                      <Switch v-model="taskSettings.videoCategories.useAI" />
+                    </div>
+
+                    <div v-if="taskSettings.videoCategories.useAI" class="space-y-2">
+                      <div class="flex items-center justify-between">
+                        <div>
+                          <Label>优先使用 AI 判断</Label>
+                          <p class="text-xs text-muted-foreground">优先使用 AI 而非关键词匹配（推荐）</p>
+                        </div>
+                        <Switch v-model="taskSettings.videoCategories.prioritizeAI" />
+                      </div>
+
+                      <div class="space-y-2">
+                        <Label>AI 分析提示词</Label>
+                        <Input
+                          v-model="taskSettings.videoCategories.aiPrompt"
+                          placeholder="自定义 AI 分析提示词（可选）"
+                        />
+                        <p class="text-xs text-muted-foreground">
+                          AI 将根据此提示词、视频描述、标签和热门评论来判断视频是否属于目标分类
+                        </p>
+                      </div>
+                    </div>
+                  </template>
+                </TabsContent>
+              </Tabs>
             </CardContent>
           </Card>
 
-          <Card>
+          <!-- 任务操作配置 -->
+          <Card v-if="selectedTaskType === 'comment'">
             <CardHeader>
-              <CardTitle>规则组</CardTitle>
+              <CardTitle>评论配置</CardTitle>
             </CardHeader>
             <CardContent class="space-y-4">
-              <div class="grid gap-4 md:grid-cols-3">
-                <div class="space-y-2">
-                  <Label>规则组名称</Label>
-                  <Input v-model="newRuleGroup.name" placeholder="输入规则组名称" />
-                </div>
-                <div class="space-y-2">
-                  <Label>规则类型</Label>
-                  <Select v-model="newRuleGroup.type">
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="manual">手动规则</SelectItem>
-                      <SelectItem value="ai">AI 规则</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div class="space-y-2">
-                  <Label>评论内容</Label>
-                  <Input v-model="(newRuleGroup.commentTexts || [''])[0]" placeholder="输入评论内容" />
+              <div class="space-y-2">
+                <Label>评论来源</Label>
+                <div class="flex gap-2">
+                  <Button
+                    :variant="!taskSettings.aiCommentEnabled ? 'default' : 'outline'"
+                    size="sm"
+                    @click="taskSettings.aiCommentEnabled = false"
+                  >评论列表随机</Button>
+                  <Button
+                    :variant="taskSettings.aiCommentEnabled ? 'default' : 'outline'"
+                    size="sm"
+                    @click="taskSettings.aiCommentEnabled = true"
+                  >AI 生成</Button>
                 </div>
               </div>
-              <Button @click="addRuleGroup" :disabled="!newRuleGroup.name">
-                <Plus class="w-4 h-4 mr-2" />
-                添加规则组
-              </Button>
 
-              <div class="space-y-3 mt-4">
-                <div v-for="(group, index) in taskSettings.ruleGroups" :key="group.id" class="p-3 bg-accent rounded-lg">
-                  <div class="flex items-center justify-between mb-2">
-                    <div class="font-medium">{{ group.name }}</div>
-                    <Button variant="ghost" size="sm" @click="removeRuleGroup(index)">
+              <div v-if="!taskSettings.aiCommentEnabled" class="space-y-2">
+                <Label>评论内容列表</Label>
+                <div v-if="currentOperation" class="space-y-2">
+                  <div v-for="(text, index) in (currentOperation.commentTexts || [])" :key="index" class="flex gap-2">
+                    <Input v-model="currentOperation.commentTexts![index]" placeholder="输入评论内容" />
+                    <Button variant="ghost" size="sm" @click="currentOperation.commentTexts?.splice(index, 1)">
                       <Trash2 class="w-4 h-4" />
                     </Button>
                   </div>
-                  <div class="text-sm text-muted-foreground">
-                    类型: {{ group.type === 'ai' ? 'AI 规则' : '手动规则' }}
-                  </div>
-                  <div v-if="group.commentTexts?.length" class="mt-2">
-                    <div class="text-sm font-medium">评论:</div>
-                    <div class="text-sm text-muted-foreground">
-                      {{ group.commentTexts.join(', ') }}
-                    </div>
-                  </div>
+                  <Button variant="outline" size="sm" @click="currentOperation.commentTexts?.push('')">
+                    <Plus class="w-4 h-4 mr-2" />
+                    添加评论
+                  </Button>
                 </div>
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle>屏蔽词</CardTitle>
-            </CardHeader>
-            <CardContent class="space-y-4">
-              <div class="space-y-2">
-                <Label>视频描述屏蔽词</Label>
-                <div class="flex gap-2">
-                  <Input v-model="newBlockKeyword" placeholder="输入屏蔽词" @keyup.enter="addBlockKeyword" />
-                  <Button @click="addBlockKeyword">添加</Button>
-                </div>
-                <div class="flex flex-wrap gap-2">
-                  <Badge v-for="(keyword, index) in taskSettings.blockKeywords" :key="index" variant="secondary">
-                    {{ keyword }}
-                    <button @click="removeBlockKeyword(index)" class="ml-1 hover:text-destructive">×</button>
-                  </Badge>
-                </div>
+                <p class="text-xs text-muted-foreground">随机从列表中选择一条评论发送</p>
               </div>
 
-              <div class="space-y-2">
-                <Label>作者名屏蔽词</Label>
-                <div class="flex gap-2">
-                  <Input v-model="newAuthorBlockKeyword" placeholder="输入屏蔽词" @keyup.enter="addAuthorBlockKeyword" />
-                  <Button @click="addAuthorBlockKeyword">添加</Button>
+              <div v-else class="space-y-4">
+                <div class="space-y-2">
+                  <Label>自定义系统提示词（可选）</Label>
+                  <textarea
+                    v-model="taskSettings.commentSystemPrompt"
+                    class="w-full min-h-[100px] px-3 py-2 text-sm border rounded-md"
+                    placeholder="留空使用默认提示词。自定义提示词可以更灵活地控制评论生成风格，减少模板化..."
+                  />
                 </div>
-                <div class="flex flex-wrap gap-2">
-                  <Badge v-for="(keyword, index) in taskSettings.authorBlockKeywords" :key="index" variant="secondary">
-                    {{ keyword }}
-                    <button @click="removeAuthorBlockKeyword(index)" class="ml-1 hover:text-destructive">×</button>
-                  </Badge>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
+                <p class="text-xs text-muted-foreground">
+                  评论内容将由 AI 根据视频内容与热门评论实时生成
+                </p>
 
-          <Card>
-            <CardHeader>
-              <CardTitle>AI 评论设置</CardTitle>
-            </CardHeader>
-            <CardContent class="space-y-4">
-              <div class="flex items-center justify-between">
-                <Label>启用 AI 生成评论</Label>
-                <Switch v-model="taskSettings.aiCommentEnabled" />
-              </div>
+                <Separator />
 
-              <div v-if="taskSettings.aiCommentEnabled" class="space-y-4">
                 <div class="space-y-2">
                   <Label>评论风格</Label>
                   <Select v-model="taskSettings.commentStyle">
@@ -1078,22 +1139,154 @@ function getTaskName(taskId: string): string {
                   <Input type="number" v-model.number="taskSettings.commentReferenceCount" />
                   <p class="text-xs text-muted-foreground">AI生成评论时参考该视频的热门评论风格和话题</p>
                 </div>
+              </div>
+            </CardContent>
+          </Card>
 
-                <div class="space-y-2">
-                  <Label>自定义系统提示词（可选）</Label>
-                  <textarea
-                    v-model="taskSettings.commentSystemPrompt"
-                    class="w-full min-h-[100px] px-3 py-2 text-sm border rounded-md"
-                    placeholder="留空使用默认提示词。自定义提示词可以更灵活地控制评论生成风格，减少模板化..."
-                  />
-                  <p class="text-xs text-muted-foreground">
-                    自定义 AI 生成评论的系统提示词，可以更灵活地控制评论风格和内容
-                  </p>
+          <Card v-else-if="selectedTaskType === 'combo'">
+            <CardHeader>
+              <CardTitle>组合操作配置</CardTitle>
+              <CardDescription>配置多种操作及其执行概率</CardDescription>
+            </CardHeader>
+            <CardContent class="space-y-4">
+              <div class="flex items-center justify-between">
+                <div>
+                  <Label>首次成功后停止</Label>
+                  <p class="text-xs text-muted-foreground">任意操作成功后立即停止，不再执行其他操作</p>
                 </div>
+                <Switch v-model="taskSettings.comboStopOnFirstSuccess" />
               </div>
 
+              <Tabs v-model="activeComboTab" class="w-full">
+                <div class="flex items-center gap-2">
+                  <TabsList>
+                    <TabsTrigger v-for="op in taskSettings.operations" :key="op.type" :value="op.type">
+                      <span :class="{ 'opacity-50': !op.enabled }">{{ { comment: '评论', like: '点赞', collect: '收藏', follow: '关注' }[op.type] }}</span>
+                    </TabsTrigger>
+                  </TabsList>
+                  <Button variant="outline" size="sm" @click="addOperation">
+                    <Plus class="w-4 h-4" />
+                  </Button>
+                </div>
+
+                <TabsContent v-for="op in taskSettings.operations" :key="op.type" :value="op.type" class="space-y-4 mt-4">
+                  <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-2">
+                      <Switch v-model="op.enabled" />
+                      <Label>启用{{ { comment: '评论', like: '点赞', collect: '收藏', follow: '关注' }[op.type] }}</Label>
+                    </div>
+                    <Button v-if="taskSettings.operations.length > 1" variant="ghost" size="sm" @click="taskSettings.operations.splice(taskSettings.operations.indexOf(op), 1)">
+                      <Trash2 class="w-4 h-4" />
+                    </Button>
+                  </div>
+
+                  <div v-if="op.enabled" class="space-y-4">
+                    <div class="space-y-2">
+                      <Label>执行概率 ({{ (op.probability * 100).toFixed(0) }}%)</Label>
+                      <Slider :model-value="[op.probability * 100]" @update:model-value="op.probability = $event[0] / 100" :min="0" :max="100" :step="10" class="w-full" />
+                    </div>
+
+                    <!-- 评论操作特有配置 -->
+                    <template v-if="op.type === 'comment'">
+                      <Separator />
+
+                      <div class="space-y-2">
+                        <Label>评论来源</Label>
+                        <div class="flex gap-2">
+                          <Button
+                            :variant="!op.aiEnabled ? 'default' : 'outline'"
+                            size="sm"
+                            @click="op.aiEnabled = false"
+                          >评论列表随机</Button>
+                          <Button
+                            :variant="op.aiEnabled ? 'default' : 'outline'"
+                            size="sm"
+                            @click="op.aiEnabled = true"
+                          >AI 生成</Button>
+                        </div>
+                      </div>
+
+                      <div v-if="!op.aiEnabled" class="space-y-2">
+                        <Label>评论内容</Label>
+                        <div class="space-y-2">
+                          <div v-for="(text, textIndex) in (op.commentTexts || [])" :key="textIndex" class="flex gap-2">
+                            <Input v-model="op.commentTexts![textIndex]" placeholder="输入评论内容" />
+                            <Button variant="ghost" size="sm" @click="op.commentTexts?.splice(textIndex, 1)">
+                              <Trash2 class="w-4 h-4" />
+                            </Button>
+                          </div>
+                          <Button variant="outline" size="sm" @click="if (!op.commentTexts) op.commentTexts = []; op.commentTexts.push('')">
+                            <Plus class="w-4 h-4 mr-2" />
+                            添加评论
+                          </Button>
+                        </div>
+                        <p class="text-xs text-muted-foreground">随机从列表中选择一条评论发送</p>
+                      </div>
+
+                      <div v-else class="space-y-4">
+                        <div class="space-y-2">
+                          <Label>自定义系统提示词（可选）</Label>
+                          <textarea
+                            v-model="taskSettings.commentSystemPrompt"
+                            class="w-full min-h-[100px] px-3 py-2 text-sm border rounded-md"
+                            placeholder="留空使用默认提示词。自定义提示词可以更灵活地控制评论生成风格，减少模板化..."
+                          />
+                        </div>
+                        <p class="text-xs text-muted-foreground">
+                          评论内容将由 AI 根据视频内容与热门评论实时生成
+                        </p>
+
+                        <Separator />
+
+                        <div class="space-y-2">
+                          <Label>评论风格</Label>
+                          <Select v-model="taskSettings.commentStyle">
+                            <SelectTrigger>
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="mixed">混合风格</SelectItem>
+                              <SelectItem value="humorous">幽默风趣</SelectItem>
+                              <SelectItem value="serious">认真专业</SelectItem>
+                              <SelectItem value="question">提问互动</SelectItem>
+                              <SelectItem value="praise">真诚赞美</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+
+                        <div class="space-y-2">
+                          <Label>评论最大字数</Label>
+                          <Input type="number" v-model.number="taskSettings.commentMaxLength" />
+                        </div>
+
+                        <div class="space-y-2">
+                          <Label>参考热门评论条数</Label>
+                          <Input type="number" v-model.number="taskSettings.commentReferenceCount" />
+                          <p class="text-xs text-muted-foreground">AI生成评论时参考该视频的热门评论风格和话题</p>
+                        </div>
+                      </div>
+                    </template>
+                  </div>
+
+                  <div v-else class="py-4 text-center text-sm text-muted-foreground">
+                    {{ { comment: '评论', like: '点赞', collect: '收藏', follow: '关注' }[op.type] }}操作已禁用，开启后可配置详细参数
+                  </div>
+                </TabsContent>
+              </Tabs>
+            </CardContent>
+          </Card>
+
+          <Card v-else>
+            <CardHeader>
+              <CardTitle>{{ { like: '点赞', collect: '收藏', follow: '关注' }[selectedTaskType] }}配置</CardTitle>
+            </CardHeader>
+            <CardContent>
               <p class="text-sm text-muted-foreground">
-                启用后，评论内容将由 AI 根据视频内容与热门评论实时生成
+                {{ {
+                  like: '点赞任务会自动为符合条件的视频点赞',
+                  collect: '收藏任务会自动收藏符合条件的视频',
+                  follow: '关注任务会自动关注符合条件的视频作者'
+                }[selectedTaskType] }}
               </p>
             </CardContent>
           </Card>

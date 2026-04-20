@@ -46,7 +46,7 @@ export interface TaskHistoryRecord {
   platform: string         // 平台标识
   startTime: number
   endTime: number | null
-  status: 'running' | 'completed' | 'stopped' | 'error'
+  status: 'running' | 'paused' | 'completed' | 'stopped' | 'error'
   commentCount: number
   likeCount: number
   collectCount: number

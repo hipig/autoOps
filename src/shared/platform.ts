@@ -1,6 +1,6 @@
 export type Platform = 'douyin' | 'kuaishou' | 'xiaohongshu' | 'wechat'
 
-export type TaskType = 'comment' | 'like' | 'collect' | 'follow' | 'watch' | 'combo'
+export type TaskType = 'comment' | 'like' | 'collect' | 'follow' | 'combo'
 
 export { TaskOperation } from './task-operation'
 export { TASK_TYPE_LABELS, TASK_OPERATION_LABELS } from './task-operation'

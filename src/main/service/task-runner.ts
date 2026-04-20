@@ -30,6 +30,8 @@ export class TaskRunner extends EventEmitter {
   private adapter?: BasePlatformAdapter
   private _stopped = false
   private _paused = false
+  private _closed = false
+  private _stoppedEmitted = false
   private taskId = ''
   private currentVideoStartTime = 0
   private videoCache = new Map<string, any>()
@@ -78,6 +80,8 @@ export class TaskRunner extends EventEmitter {
     this.taskId = generateId()
     this._stopped = false
     this._paused = false
+    this._closed = false
+    this._stoppedEmitted = false
     this._status = 'running'
     this._crudTaskId = config.crudTaskId || ''
 
@@ -152,8 +156,7 @@ export class TaskRunner extends EventEmitter {
     // 异步执行任务循环
     this.runTask(config).catch((err) => {
       log.error(`TaskRunner ${this.taskId} error:`, err)
-      this._status = 'failed'
-      this.emit('stopped')
+      this.handleRunTaskError()
     })
 
     return this.taskId
@@ -167,6 +170,8 @@ export class TaskRunner extends EventEmitter {
     this.taskId = generateId()
     this._stopped = false
     this._paused = false
+    this._closed = false
+    this._stoppedEmitted = false
     this._status = 'running'
     this._crudTaskId = config.crudTaskId || ''
 
@@ -202,8 +207,7 @@ export class TaskRunner extends EventEmitter {
     // 异步执行任务循环
     this.runTask(config).catch((err) => {
       log.error(`TaskRunner ${this.taskId} error:`, err)
-      this._status = 'failed'
-      this.emit('stopped')
+      this.handleRunTaskError()
     })
 
     return this.taskId
@@ -264,13 +268,34 @@ export class TaskRunner extends EventEmitter {
 
   async stop(): Promise<void> {
     log.info(`TaskRunner ${this.taskId} stopping...`)
+    // 若已终态，不要覆盖
+    const isTerminal = this._status === 'completed' || this._status === 'failed' || this._status === 'stopped'
     this._stopped = true
     this._paused = false
-    this._status = 'stopped'
+    if (!isTerminal) {
+      this._status = 'stopped'
+    }
     await this.close()
+    this.safeEmitStopped()
+  }
+
+  private handleRunTaskError(): void {
+    // 若 stop() 已将状态置为终态（stopped/completed），不要覆盖为 failed
+    if (this._status !== 'stopped' && this._status !== 'completed' && this._status !== 'failed') {
+      this._status = 'failed'
+    }
+    this.safeEmitStopped()
+  }
+
+  private safeEmitStopped(): void {
+    if (this._stoppedEmitted) return
+    this._stoppedEmitted = true
+    this.emit('stopped')
   }
 
   private async close(): Promise<void> {
+    if (this._closed) return
+    this._closed = true
     if (this.page && this.context) {
       try {
         const state = await this.context.storageState()
@@ -464,7 +489,7 @@ export class TaskRunner extends EventEmitter {
     }
 
     await this.close()
-    this.emit('stopped')
+    this.safeEmitStopped()
   }
 
   private async getCurrentVideoInfo(maxRetries = 3): Promise<VideoInfo | null> {
@@ -1080,7 +1105,7 @@ export class TaskRunner extends EventEmitter {
     } else if (this._status === 'running') {
       status = 'running'
     } else if (this._status === 'paused') {
-      status = 'running' // 暂停状态在历史记录中仍显示为运行中
+      status = 'paused'
     }
 
     return {
