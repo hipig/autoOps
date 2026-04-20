@@ -260,4 +260,12 @@ export class XiaohongshuPlatformAdapter extends BasePlatformAdapter {
     this.browser = undefined
     this.context = undefined
   }
+
+  async getPlaybackProgress(): Promise<{ current: number; total: number } | null> {
+    return null
+  }
+
+  async setPlaybackRate(_rate: number): Promise<boolean> {
+    return false
+  }
 }

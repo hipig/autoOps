@@ -141,6 +141,12 @@ const newRuleGroup = ref<Partial<FeedAcRuleGroups>>({
 })
 
 const activeComboTab = ref('comment')
+
+const longVideoSpeedStr = computed({
+  get: () => String(taskSettings.value.longVideoSpeed || 2),
+  set: (val: string) => { taskSettings.value.longVideoSpeed = parseFloat(val) }
+})
+
 const newBlockKeyword = ref('')
 const newAuthorBlockKeyword = ref('')
 const newCustomCategoryKeyword = ref('')
@@ -872,6 +878,45 @@ function getTaskName(taskId: string): string {
                   />
                 </div>
                 <p class="text-sm text-muted-foreground">根据视频实际时长的百分比来观看，例如 20%-50% 表示观看视频时长的 20% 到 50%</p>
+              </div>
+
+              <Separator />
+
+              <div class="font-medium text-sm text-muted-foreground">长视频处理</div>
+              <div class="space-y-2">
+                <Label>长视频阈值（秒）</Label>
+                <Input type="number" v-model.number="taskSettings.longVideoThreshold" :min="10" />
+                <p class="text-xs text-muted-foreground">超过此时长的视频视为长视频</p>
+              </div>
+
+              <div class="space-y-2">
+                <Label>长视频处理方式</Label>
+                <Select v-model="taskSettings.longVideoAction">
+                  <SelectTrigger>
+                    <SelectValue placeholder="选择处理方式" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="skip">跳过</SelectItem>
+                    <SelectItem value="speed">倍速播放</SelectItem>
+                    <SelectItem value="normal">正常观看</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div v-if="taskSettings.longVideoAction === 'speed'" class="space-y-2">
+                <Label>倍速播放速度</Label>
+                <Select v-model="longVideoSpeedStr">
+                  <SelectTrigger>
+                    <SelectValue placeholder="选择倍速" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="1.25">1.25x</SelectItem>
+                    <SelectItem value="1.5">1.5x</SelectItem>
+                    <SelectItem value="1.75">1.75x</SelectItem>
+                    <SelectItem value="2">2.0x</SelectItem>
+                    <SelectItem value="3">3.0x</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
 
               <Separator />

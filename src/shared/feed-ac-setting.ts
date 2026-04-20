@@ -111,6 +111,10 @@ export interface FeedAcSettingsV3 {
   commentStyle: CommentStyle     // 评论风格（默认 mixed）
   commentMaxLength: number       // 评论最大字数（默认 50）
   commentSystemPrompt?: string   // 评论生成系统提示词（可自定义）
+  // 长视频处理
+  longVideoThreshold: number         // 长视频阈值（秒），超过此时长视为长视频（默认 120）
+  longVideoAction: 'skip' | 'speed' | 'normal'  // 长视频处理方式：跳过/倍速/正常（默认 skip）
+  longVideoSpeed: number             // 长视频倍速（默认 2.0）
   // 视频分类筛选
   videoCategories: VideoCategoryConfig
 }
@@ -175,6 +179,9 @@ export function getDefaultFeedAcSettingsV3(taskType?: 'comment' | 'like' | 'coll
     commentReferenceCount: 5,
     commentStyle: 'mixed',
     commentMaxLength: 50,
+    longVideoThreshold: 120,
+    longVideoAction: 'skip',
+    longVideoSpeed: 2.0,
     videoCategories: getDefaultVideoCategoryConfig()
   }
 }
@@ -207,6 +214,9 @@ export function migrateToV3(settings: FeedAcSettingsV2): FeedAcSettingsV3 {
     commentReferenceCount: 5,
     commentStyle: 'mixed',
     commentMaxLength: 50,
+    longVideoThreshold: 120,
+    longVideoAction: 'skip',
+    longVideoSpeed: 2.0,
     videoCategories: getDefaultVideoCategoryConfig()
   }
 }

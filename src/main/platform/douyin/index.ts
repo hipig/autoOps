@@ -728,6 +728,75 @@ export class DouyinPlatformAdapter extends BasePlatformAdapter {
     return this.currentVideoStartTime
   }
 
+  private parseTimeString(timeStr: string): number {
+    const parts = timeStr.split(':').map(p => parseInt(p, 10))
+    if (parts.length === 2) return parts[0] * 60 + parts[1]
+    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2]
+    return 0
+  }
+
+  async getPlaybackProgress(): Promise<{ current: number; total: number } | null> {
+    if (!this.page) return null
+    try {
+      return await this.page.evaluate(() => {
+        const activeVideo = document.querySelector('[data-e2e="feed-active-video"]')
+        if (!activeVideo) return null
+
+        const currentEl = activeVideo.querySelector('.time-current') ||
+          activeVideo.querySelector('span.time-current')
+        const durationEl = activeVideo.querySelector('.time-duration') ||
+          activeVideo.querySelector('span.time-duration')
+
+        if (!currentEl || !durationEl) return null
+
+        const parseTime = (str: string): number => {
+          const parts = str.split(':').map(p => parseInt(p, 10))
+          if (parts.length === 2) return parts[0] * 60 + parts[1]
+          if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2]
+          return 0
+        }
+
+        const current = parseTime(currentEl.textContent?.trim() || '0:00')
+        const total = parseTime(durationEl.textContent?.trim() || '0:00')
+
+        return { current, total }
+      })
+    } catch {
+      return null
+    }
+  }
+
+  async setPlaybackRate(rate: number): Promise<boolean> {
+    if (!this.page) return false
+    try {
+      const validRates = [0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 3.0]
+      const closest = validRates.reduce((prev, curr) =>
+        Math.abs(curr - rate) < Math.abs(prev - rate) ? curr : prev
+      )
+
+      const settingBtn = await this.page.$('.xgplayer-playback-setting')
+      if (!settingBtn) return false
+
+      await settingBtn.hover()
+      await this.page.waitForTimeout(500)
+
+      const selector = `.xgplayer-playratio-item[data-id="${closest}"]`
+      const rateBtn = await this.page.waitForSelector(selector, { state: 'visible', timeout: 3000 }).catch(() => null)
+      if (rateBtn) {
+        await rateBtn.click()
+        await this.page.waitForTimeout(200)
+        // 移开鼠标，收起悬浮面板
+        await this.page.mouse.move(0, 0)
+        return true
+      }
+
+      await this.page.mouse.move(0, 0)
+      return false
+    } catch {
+      return false
+    }
+  }
+
   async close(): Promise<void> {
     if (this.page && this.context) {
       const state = await this.context.storageState()

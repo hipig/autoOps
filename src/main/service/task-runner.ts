@@ -145,7 +145,8 @@ export class TaskRunner extends EventEmitter {
     await this.autoEnterVideoMode()
 
     const aiSettings = store.get(StorageKey.AI_SETTINGS) as AISettings | null
-    if (aiSettings && config.settings.aiCommentEnabled) {
+    const needAI = config.settings.aiCommentEnabled || config.settings.operations?.some(op => op.aiEnabled)
+    if (aiSettings && needAI) {
       this.aiService = createAIService(aiSettings.platform, {
         apiKey: aiSettings.apiKeys[aiSettings.platform],
         model: aiSettings.model,
@@ -196,7 +197,8 @@ export class TaskRunner extends EventEmitter {
     await this.autoEnterVideoMode()
 
     const aiSettings = store.get(StorageKey.AI_SETTINGS) as AISettings | null
-    if (aiSettings && config.settings.aiCommentEnabled) {
+    const needAI = config.settings.aiCommentEnabled || config.settings.operations?.some(op => op.aiEnabled)
+    if (aiSettings && needAI) {
       this.aiService = createAIService(aiSettings.platform, {
         apiKey: aiSettings.apiKeys[aiSettings.platform],
         model: aiSettings.model,
@@ -430,9 +432,12 @@ export class TaskRunner extends EventEmitter {
       }
 
       if (settings.simulateWatchBeforeComment) {
-        const watchTime = this.calculateWatchTime(videoInfo, settings)
-        this.log('info', `模拟观看 ${(watchTime / 1000).toFixed(1)} 秒`)
-        await sleep(watchTime)
+        const skipWatch = await this.simulateWatch(videoInfo, settings)
+        if (skipWatch) {
+          await this.recordSkip(videoInfo, '手动切换/长视频跳过')
+          this.consecutiveSkipCount++
+          continue
+        }
       }
 
       const results = await this.executeOperations(videoInfo, settings, taskType, operationCounts)
@@ -523,6 +528,25 @@ export class TaskRunner extends EventEmitter {
 
       this.videoCache.delete(videoId)
 
+      const rawDuration = videoData.video?.duration || videoData.duration
+      let duration: number | undefined
+      if (rawDuration) {
+        duration = rawDuration > 1000 ? Math.floor(rawDuration / 1000) : rawDuration
+      }
+
+      if (!duration && this.page) {
+        try {
+          duration = await this.page.evaluate(() => {
+            const el = document.querySelector('[data-e2e="feed-active-video"] .time-duration')
+            if (!el) return undefined
+            const parts = (el.textContent?.trim() || '').split(':').map(p => parseInt(p, 10))
+            if (parts.length === 2) return parts[0] * 60 + parts[1]
+            if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2]
+            return undefined
+          }) || undefined
+        } catch { /* ignore */ }
+      }
+
       return {
         videoId: videoData.aweme_id,
         title: videoData.desc,
@@ -539,6 +563,7 @@ export class TaskRunner extends EventEmitter {
         commentCount: videoData.statistics?.comment_count || 0,
         shareUrl: videoData.share_url || '',
         createTime: Date.now(),
+        duration,
         _raw: videoData
       } as VideoInfo & { _raw: any }
     }
@@ -760,25 +785,133 @@ export class TaskRunner extends EventEmitter {
     return random(minSeconds, maxSeconds) * 1000
   }
 
+  private async hasVideoChanged(originalVideoId: string): Promise<boolean> {
+    if (!this.adapter) return false
+    const currentId = await this.adapter.getActiveVideoId()
+    return currentId !== null && currentId !== originalVideoId
+  }
+
+  private async simulateWatch(
+    videoInfo: VideoInfo,
+    settings: FeedAcSettingsV3
+  ): Promise<boolean> {
+    const duration = videoInfo.duration || 0
+    const threshold = settings.longVideoThreshold || 120
+    const longVideoAction = settings.longVideoAction || 'skip'
+    const isLongVideo = duration > 0 && duration > threshold
+
+    let playbackRate = 1.0
+
+    if (isLongVideo) {
+      this.log('info', `长视频检测: ${duration}秒 (阈值: ${threshold}秒)`)
+      if (longVideoAction === 'skip') {
+        this.log('info', '长视频策略: 跳过')
+        return true
+      }
+      if (longVideoAction === 'speed' && this.adapter) {
+        playbackRate = settings.longVideoSpeed || 2.0
+        this.log('info', `长视频策略: 倍速播放 ${playbackRate}x`)
+        if ('setPlaybackRate' in this.adapter) {
+          await (this.adapter as any).setPlaybackRate(playbackRate)
+        }
+      }
+    }
+
+    let watchTimeMs = this.calculateWatchTime(videoInfo, settings)
+    // 倍速播放时，实际等待时间需要除以播放速率
+    if (playbackRate > 1) {
+      const original = watchTimeMs
+      watchTimeMs = Math.max(Math.floor(watchTimeMs / playbackRate), 1000)
+      this.log('info', `倍速 ${playbackRate}x: 计划观看 ${(original / 1000).toFixed(1)}秒 → 实际等待 ${(watchTimeMs / 1000).toFixed(1)}秒`)
+    }
+    const progress = this.adapter && 'getPlaybackProgress' in this.adapter
+      ? await (this.adapter as any).getPlaybackProgress()
+      : null
+
+    if (progress && progress.current > 0) {
+      const alreadyWatchedMs = progress.current * 1000
+      const adjustedMs = Math.max(watchTimeMs - alreadyWatchedMs, 1000)
+      this.log('info', `当前播放进度: ${this.formatTime(progress.current)}/${this.formatTime(progress.total)}, 计划观看 ${(watchTimeMs / 1000).toFixed(1)}秒, 扣除已播放后实际等待 ${(adjustedMs / 1000).toFixed(1)}秒`)
+      watchTimeMs = adjustedMs
+    } else {
+      this.log('info', `模拟观看 ${(watchTimeMs / 1000).toFixed(1)}秒`)
+    }
+
+    const checkInterval = 1000
+    let elapsed = 0
+    while (elapsed < watchTimeMs && !this._stopped) {
+      while (this._paused && !this._stopped) {
+        await sleep(500)
+      }
+      if (this._stopped) break
+
+      if (await this.hasVideoChanged(videoInfo.videoId)) {
+        this.log('info', '检测到视频已切换，中止当前操作')
+        if (playbackRate > 1 && this.adapter && 'setPlaybackRate' in this.adapter) {
+          await (this.adapter as any).setPlaybackRate(1.0)
+        }
+        return true
+      }
+
+      await sleep(checkInterval)
+      elapsed += checkInterval
+    }
+
+    if (playbackRate > 1 && this.adapter && 'setPlaybackRate' in this.adapter) {
+      await (this.adapter as any).setPlaybackRate(1.0)
+    }
+
+    return false
+  }
+
+  private formatTime(seconds: number): string {
+    const m = Math.floor(seconds / 60)
+    const s = seconds % 60
+    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
+  }
+
   /**
    * 自动进入视频播放模式（点击首页第一个视频）
    */
   private async autoEnterVideoMode(): Promise<void> {
     if (!this.page) return
     try {
-      // 等待视频列表加载
-      const firstVideo = await this.page.waitForSelector('[data-e2e="recommend-list-item-container"]', {
-        timeout: 5000
-      }).catch(() => null)
+      // 从首页提取第一个视频的 aweme_id
+      const awemeId = await this.page.evaluate(() => {
+        const el = document.querySelector('[data-aweme-id]')
+        return el?.getAttribute('data-aweme-id') || null
+      })
 
-      if (firstVideo) {
-        log.info(`[TaskRunner ${this.taskId}] 自动点击首页第一个视频进入播放模式`)
-        await firstVideo.click()
-        await sleep(1500)
-        log.info(`[TaskRunner ${this.taskId}] 已进入视频播放模式`)
+      if (awemeId) {
+        log.info(`[TaskRunner ${this.taskId}] 提取到视频ID: ${awemeId}，跳转精选页`)
+        await this.page.goto(`https://www.douyin.com/jingxuan?modal_id=${awemeId}`, {
+          waitUntil: 'domcontentloaded',
+          timeout: 15000
+        })
+        await sleep(2000)
+
+        // 等待视频播放器加载
+        await this.page.waitForSelector('[data-e2e="feed-active-video"]', {
+          state: 'visible',
+          timeout: 10000
+        }).catch(() => null)
+
+        // 按 K 关闭连播功能
+        await this.page.keyboard.press('k')
+        await sleep(500)
+        log.info(`[TaskRunner ${this.taskId}] 已关闭连播功能`)
       } else {
-        log.warn(`[TaskRunner ${this.taskId}] 未找到首页视频，可能需要手动点击`)
+        log.warn(`[TaskRunner ${this.taskId}] 未找到 data-aweme-id，尝试点击首页视频`)
+        const firstVideo = await this.page.waitForSelector('[data-e2e="recommend-list-item-container"]', {
+          timeout: 5000
+        }).catch(() => null)
+        if (firstVideo) {
+          await firstVideo.click()
+          await sleep(1500)
+        }
       }
+
+      log.info(`[TaskRunner ${this.taskId}] 已进入视频播放模式`)
     } catch (e) {
       log.warn(`[TaskRunner ${this.taskId}] 自动进入视频模式失败: ${e}`)
     }
@@ -875,6 +1008,11 @@ export class TaskRunner extends EventEmitter {
         if (op.maxCount && (operationCounts[op.type] || 0) >= op.maxCount) continue
         if (Math.random() > op.probability) continue
 
+        if (await this.hasVideoChanged(videoInfo.videoId)) {
+          this.log('info', '执行操作时检测到视频已切换，中止剩余操作')
+          break
+        }
+
         const result = await this.executeSingleOperation(videoInfo, op.type, settings, op)
         results.push({ success: result.success, action: op.type, commentText: result.commentText, error: result.error })
         if (settings.comboStopOnFirstSuccess && result.success) break
@@ -882,6 +1020,10 @@ export class TaskRunner extends EventEmitter {
     } else {
       const operation = settings.operations.find(op => op.type === taskType)
       if (operation && operation.enabled) {
+        if (await this.hasVideoChanged(videoInfo.videoId)) {
+          this.log('info', '执行操作时检测到视频已切换，跳过当前操作')
+          return results
+        }
         if (Math.random() <= operation.probability) {
           const result = await this.executeSingleOperation(videoInfo, taskType, settings, operation)
           results.push({ success: result.success, action: taskType, commentText: result.commentText, error: result.error })

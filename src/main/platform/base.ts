@@ -43,6 +43,8 @@ export abstract class BasePlatformAdapter extends EventEmitter {
   abstract isCommentSectionOpen(): Promise<boolean>
 
   abstract getActiveVideoId(): Promise<string | null>
+  abstract getPlaybackProgress(): Promise<{ current: number; total: number } | null>
+  abstract setPlaybackRate(rate: number): Promise<boolean>
 
   setVideoCache(cache: Map<string, unknown>): void {
     this.videoCache = cache
