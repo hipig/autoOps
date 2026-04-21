@@ -985,6 +985,14 @@ function getTaskName(taskId: string): string {
                     </div>
                     <Switch v-model="taskSettings.onlyCommentActiveVideo" />
                   </div>
+
+                  <div class="flex items-center justify-between">
+                    <div>
+                      <Label>自动静音</Label>
+                      <p class="text-xs text-muted-foreground">进入播放页时自动将视频静音</p>
+                    </div>
+                    <Switch v-model="taskSettings.autoMute" />
+                  </div>
                 </TabsContent>
 
                 <TabsContent value="block-words" class="space-y-4 mt-4">

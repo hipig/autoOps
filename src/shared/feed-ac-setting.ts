@@ -106,6 +106,7 @@ export interface FeedAcSettingsV3 {
   // 视频切换控制
   maxConsecutiveSkips: number    // 连续跳过最大次数（默认 20），超过后暂停任务
   videoSwitchWaitRange: [number, number]  // 切换视频后等待时间范围(秒)（默认 [5, 10]）
+  autoMute: boolean                       // 进入播放页时自动静音（默认 true）
   // AI评论控制
   commentReferenceCount: number  // AI评论参考热门评论条数（默认 5）
   commentStyle: CommentStyle     // 评论风格（默认 mixed）
@@ -176,6 +177,7 @@ export function getDefaultFeedAcSettingsV3(taskType?: 'comment' | 'like' | 'coll
     skipImageSet: false,
     maxConsecutiveSkips: 20,
     videoSwitchWaitRange: [5, 10],
+    autoMute: true,
     commentReferenceCount: 5,
     commentStyle: 'mixed',
     commentMaxLength: 50,
@@ -211,6 +213,7 @@ export function migrateToV3(settings: FeedAcSettingsV2): FeedAcSettingsV3 {
     skipImageSet: false,
     maxConsecutiveSkips: 20,
     videoSwitchWaitRange: [5, 10],
+    autoMute: true,
     commentReferenceCount: 5,
     commentStyle: 'mixed',
     commentMaxLength: 50,

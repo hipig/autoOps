@@ -42,6 +42,7 @@ export class TaskRunner extends EventEmitter {
   private externalContext = false // 是否使用外部传入的context
   private _crudTaskId = '' // CRUD 任务 ID
   private _videoRecords: VideoRecord[] = []  // 视频操作记录
+  private _operatedVideoIds = new Set<string>()  // 已操作过的视频ID，防止重复操作
   private _startTime = 0  // 任务开始时间
   private _accountId = ''  // 关联账号ID
   private _commentCount = 0  // 评论成功数
@@ -51,6 +52,7 @@ export class TaskRunner extends EventEmitter {
   private _logs: LogEntry[] = []  // 详细日志
   private currentVideoAIFilter?: { matched: boolean; reason: string; prompt?: string }  // 当前视频的AI过滤结果
   private currentVideoAIComment?: { comment: string; topComments?: Array<{ content: string; likeCount: number }>; prompt?: string }  // 当前视频的AI评论结果
+  private preGeneratedComment?: { text: string; topComments: Array<{ content: string; likeCount: number }>; prompt?: string } | null
 
   get status(): TaskRunnerStatus {
     return this._status
@@ -142,7 +144,7 @@ export class TaskRunner extends EventEmitter {
     log.info(`[TaskRunner ${this.taskId}] Page loaded, video cache size: ${this.videoCache.size}`)
 
     // 自动点击首页第一个视频进入播放模式
-    await this.autoEnterVideoMode()
+    await this.autoEnterVideoMode(config.settings)
 
     const aiSettings = store.get(StorageKey.AI_SETTINGS) as AISettings | null
     const needAI = config.settings.aiCommentEnabled || config.settings.operations?.some(op => op.aiEnabled)
@@ -194,7 +196,7 @@ export class TaskRunner extends EventEmitter {
     log.info(`[TaskRunner ${this.taskId}] Page loaded, video cache size: ${this.videoCache.size}`)
 
     // 自动点击首页第一个视频进入播放模式
-    await this.autoEnterVideoMode()
+    await this.autoEnterVideoMode(config.settings)
 
     const aiSettings = store.get(StorageKey.AI_SETTINGS) as AISettings | null
     const needAI = config.settings.aiCommentEnabled || config.settings.operations?.some(op => op.aiEnabled)
@@ -330,6 +332,7 @@ export class TaskRunner extends EventEmitter {
     // 初始化历史记录相关变量
     this._startTime = Date.now()
     this._videoRecords = []
+    this._operatedVideoIds = new Set()
     this._accountId = config.accountId || ''
     this._commentCount = 0
     this._likeCount = 0
@@ -359,6 +362,7 @@ export class TaskRunner extends EventEmitter {
       // 重置当前视频的AI结果
       this.currentVideoAIFilter = undefined
       this.currentVideoAIComment = undefined
+      this.preGeneratedComment = undefined
 
       const videoSwitchWaitRange = settings.videoSwitchWaitRange || [5, 10]
       const waitSeconds = random(videoSwitchWaitRange[0], videoSwitchWaitRange[1])
@@ -367,6 +371,17 @@ export class TaskRunner extends EventEmitter {
       const videoInfo = await this.getCurrentVideoInfo()
       if (!videoInfo) {
         this.log('warn', '未获取到视频信息，跳到下一个')
+        this.consecutiveSkipCount++
+        if (this.consecutiveSkipCount >= maxConsecutiveSkips) {
+          this.log('error', `连续跳过 ${this.consecutiveSkipCount} 次，超过阈值 ${maxConsecutiveSkips}，任务暂停`)
+          break
+        }
+        await this.goToNextVideo()
+        continue
+      }
+
+      if (this._operatedVideoIds.has(videoInfo.videoId)) {
+        this.log('info', `跳过(已操作过): @${videoInfo.author.nickname} [${videoInfo.videoId}]`)
         this.consecutiveSkipCount++
         if (this.consecutiveSkipCount >= maxConsecutiveSkips) {
           this.log('error', `连续跳过 ${this.consecutiveSkipCount} 次，超过阈值 ${maxConsecutiveSkips}，任务暂停`)
@@ -412,6 +427,7 @@ export class TaskRunner extends EventEmitter {
       this.log('info', `视频描述: ${videoInfo.description}`)
 
       if (this.checkBlockKeywords(videoInfo, settings)) {
+        this.log('info', `跳过(命中屏蔽词): @${videoInfo.author.nickname}`)
         await this.recordSkip(videoInfo, '命中屏蔽词')
         this.consecutiveSkipCount++
         await this.goToNextVideo()
@@ -431,14 +447,30 @@ export class TaskRunner extends EventEmitter {
         continue
       }
 
+      // 在观看等待之前预生成AI评论，利用等待时间并行完成
+      const commentOp = taskType === 'combo'
+        ? settings.operations.find(op => op.type === 'comment' && op.enabled)
+        : (taskType === 'comment' ? settings.operations.find(op => op.type === 'comment') : undefined)
+      let preGenPromise: Promise<void> | undefined
+      if (commentOp) {
+        preGenPromise = this.preGenerateComment(videoInfo, settings, commentOp)
+      } else {
+        this.preGeneratedComment = undefined
+      }
+
       if (settings.simulateWatchBeforeComment) {
         const skipWatch = await this.simulateWatch(videoInfo, settings)
         if (skipWatch) {
+          this.log('info', `跳过(观看中断): @${videoInfo.author.nickname}`)
+          this.preGeneratedComment = undefined
           await this.recordSkip(videoInfo, '手动切换/长视频跳过')
           this.consecutiveSkipCount++
           continue
         }
       }
+
+      // 确保预生成评论已完成
+      if (preGenPromise) await preGenPromise
 
       const results = await this.executeOperations(videoInfo, settings, taskType, operationCounts)
       
@@ -464,6 +496,7 @@ export class TaskRunner extends EventEmitter {
 
       if (anySuccess) {
         this.consecutiveSkipCount = 0
+        this._operatedVideoIds.add(videoInfo.videoId)
       }
 
       if (Math.random() < 0.1 && taskType !== 'like') {
@@ -829,9 +862,9 @@ export class TaskRunner extends EventEmitter {
       : null
 
     if (progress && progress.current > 0) {
-      const alreadyWatchedMs = progress.current * 1000
-      const adjustedMs = Math.max(watchTimeMs - alreadyWatchedMs, 1000)
-      this.log('info', `当前播放进度: ${this.formatTime(progress.current)}/${this.formatTime(progress.total)}, 计划观看 ${(watchTimeMs / 1000).toFixed(1)}秒, 扣除已播放后实际等待 ${(adjustedMs / 1000).toFixed(1)}秒`)
+      const alreadyWatchedWallMs = progress.current * 1000 / playbackRate
+      const adjustedMs = Math.max(watchTimeMs - alreadyWatchedWallMs, 1000)
+      this.log('info', `当前播放进度: ${this.formatTime(progress.current)}/${this.formatTime(progress.total)} (${playbackRate}x), 计划等待 ${(watchTimeMs / 1000).toFixed(1)}秒, 扣除已播放后实际等待 ${(adjustedMs / 1000).toFixed(1)}秒`)
       watchTimeMs = adjustedMs
     } else {
       this.log('info', `模拟观看 ${(watchTimeMs / 1000).toFixed(1)}秒`)
@@ -873,7 +906,7 @@ export class TaskRunner extends EventEmitter {
   /**
    * 自动进入视频播放模式（点击首页第一个视频）
    */
-  private async autoEnterVideoMode(): Promise<void> {
+  private async autoEnterVideoMode(settings?: FeedAcSettingsV3): Promise<void> {
     if (!this.page) return
     try {
       // 从首页提取第一个视频的 aweme_id
@@ -908,6 +941,32 @@ export class TaskRunner extends EventEmitter {
         if (firstVideo) {
           await firstVideo.click()
           await sleep(1500)
+        }
+      }
+
+      // 关闭操作指引弹窗（如果存在）
+      try {
+        const guideBtn = await this.page.$('[data-e2e="recommend-guide-mask"] button')
+        if (guideBtn) {
+          await guideBtn.click()
+          await sleep(500)
+          log.info(`[TaskRunner ${this.taskId}] 已关闭操作指引弹窗`)
+        }
+      } catch {
+        // 弹窗可能不存在，忽略
+      }
+
+      // 自动静音
+      if (settings?.autoMute !== false) {
+        try {
+          const volumeBtn = await this.page.$('.xgplayer-volume')
+          if (volumeBtn) {
+            await volumeBtn.click()
+            await sleep(300)
+            log.info(`[TaskRunner ${this.taskId}] 已自动静音`)
+          }
+        } catch (e) {
+          log.warn(`[TaskRunner ${this.taskId}] 自动静音失败: ${e}`)
         }
       }
 
@@ -1004,9 +1063,18 @@ export class TaskRunner extends EventEmitter {
 
     if (taskType === 'combo') {
       for (const op of settings.operations) {
-        if (!op.enabled) continue
-        if (op.maxCount && (operationCounts[op.type] || 0) >= op.maxCount) continue
-        if (Math.random() > op.probability) continue
+        if (!op.enabled) {
+          this.log('info', `跳过操作 ${this.getActionName(op.type)}: 未启用`)
+          continue
+        }
+        if (op.maxCount && (operationCounts[op.type] || 0) >= op.maxCount) {
+          this.log('info', `跳过操作 ${this.getActionName(op.type)}: 已达上限 ${op.maxCount}`)
+          continue
+        }
+        if (Math.random() > op.probability) {
+          this.log('info', `跳过操作 ${this.getActionName(op.type)}: 概率未命中 (${(op.probability * 100).toFixed(0)}%)`)
+          continue
+        }
 
         if (await this.hasVideoChanged(videoInfo.videoId)) {
           this.log('info', '执行操作时检测到视频已切换，中止剩余操作')
@@ -1056,6 +1124,54 @@ export class TaskRunner extends EventEmitter {
     }
   }
 
+  private async preGenerateComment(
+    videoInfo: VideoInfo,
+    settings: FeedAcSettingsV3,
+    operation: FeedAcSettingsV3['operations'][0]
+  ): Promise<void> {
+    const useAI = (operation.aiEnabled || settings.aiCommentEnabled) && this.aiService
+    if (!useAI) {
+      this.preGeneratedComment = null
+      return
+    }
+
+    try {
+      let topComments: Array<{ content: string; likeCount: number }> = []
+      if (this.adapter instanceof DouyinPlatformAdapter) {
+        const refCount = settings.commentReferenceCount || 5
+        this.log('info', `[预生成] 获取热门评论(${refCount}条)作为AI参考...`)
+        topComments = await this.adapter.getTopComments(videoInfo.videoId, refCount)
+        if (topComments.length > 0) {
+          this.log('info', `[预生成] 获取到 ${topComments.length} 条热门评论`)
+        }
+      }
+
+      const videoContext = {
+        author: videoInfo.author.nickname,
+        videoDesc: videoInfo.description,
+        videoTags: videoInfo.tags,
+        topComments
+      }
+      const commentOptions = {
+        style: settings.commentStyle || 'mixed',
+        maxLength: settings.commentMaxLength || 50,
+        customPrompt: operation.aiPrompt,
+        systemPrompt: settings.commentSystemPrompt
+      }
+
+      const result = await this.aiService!.generateComment(videoContext, commentOptions)
+      this.preGeneratedComment = {
+        text: result.content,
+        topComments,
+        prompt: operation.aiPrompt || settings.commentSystemPrompt
+      }
+      this.log('info', `[预生成] AI评论已就绪: ${result.content}`)
+    } catch {
+      this.log('warn', '[预生成] AI评论生成失败，将在评论时使用备选')
+      this.preGeneratedComment = null
+    }
+  }
+
   private async executeComment(
     videoInfo: VideoInfo,
     settings: FeedAcSettingsV3,
@@ -1082,7 +1198,16 @@ export class TaskRunner extends EventEmitter {
     let commentText = ''
     const useAI = (operation.aiEnabled || settings.aiCommentEnabled) && this.aiService
 
-    if (useAI) {
+    if (useAI && this.preGeneratedComment) {
+      commentText = this.preGeneratedComment.text
+      this.log('info', `使用预生成AI评论: ${commentText}`)
+      this.currentVideoAIComment = {
+        comment: commentText,
+        topComments: this.preGeneratedComment.topComments,
+        prompt: this.preGeneratedComment.prompt
+      }
+      this.preGeneratedComment = undefined
+    } else if (useAI) {
       try {
         let topComments: Array<{ content: string; likeCount: number }> = []
         if (this.adapter instanceof DouyinPlatformAdapter) {
@@ -1111,7 +1236,6 @@ export class TaskRunner extends EventEmitter {
         commentText = result.content
         this.log('info', `AI生成评论: ${commentText}`)
 
-        // 保存AI评论结果到当前视频
         this.currentVideoAIComment = {
           comment: commentText,
           topComments,
