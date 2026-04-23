@@ -1,11 +1,11 @@
 import { EventEmitter } from 'events'
-import { chromium, Browser, BrowserContext, Page, type Response } from '@playwright/test'
+import { chromium, Browser, BrowserContext, Page } from '@playwright/test'
 import { BasePlatformAdapter, VideoRecord } from '../platform/base'
 import { createPlatformAdapter } from '../platform/factory'
 import { DouyinPlatformAdapter } from '../platform/douyin'
 import { FeedAcSettingsV3, FeedAcRuleGroups } from '../../shared/feed-ac-setting'
 import type { Platform, TaskType, VideoInfo } from '../../shared/platform'
-import { PLATFORMS, PLATFORM_CONFIGS } from '../../shared/platform'
+import { PLATFORMS } from '../../shared/platform'
 import { store, StorageKey } from '../utils/storage'
 import { createAIService, type AIService } from '../integration/ai/factory'
 import { AISettings } from '../../shared/ai-setting'
@@ -34,7 +34,6 @@ export class TaskRunner extends EventEmitter {
   private _stoppedEmitted = false
   private taskId = ''
   private currentVideoStartTime = 0
-  private videoCache = new Map<string, any>()
   private aiService: AIService | null = null
   private consecutiveSkipCount = 0
   private platform: Platform = 'douyin'
@@ -50,9 +49,8 @@ export class TaskRunner extends EventEmitter {
   private _collectCount = 0  // 收藏成功数
   private _followCount = 0  // 关注成功数
   private _logs: LogEntry[] = []  // 详细日志
-  private currentVideoAIFilter?: { matched: boolean; reason: string; prompt?: string }  // 当前视频的AI过滤结果
-  private currentVideoAIComment?: { comment: string; topComments?: Array<{ content: string; likeCount: number }>; prompt?: string }  // 当前视频的AI评论结果
-  private preGeneratedComment?: { text: string; topComments: Array<{ content: string; likeCount: number }>; prompt?: string } | null
+  private currentVideoAIFilter?: { matched: boolean; reason: string; prompt?: string }
+  private currentVideoAIComment?: { comment: string; topComments?: Array<{ content: string; likeCount: number }>; prompt?: string }
 
   get status(): TaskRunnerStatus {
     return this._status
@@ -132,16 +130,13 @@ export class TaskRunner extends EventEmitter {
 
     this.context = await this.browser.newContext({ storageState })
     this.page = await this.context.newPage()
-    this.setupVideoDataListener()
 
     this.adapter = createPlatformAdapter(config.platform)
     this.adapter.setPage(this.page)
-    this.adapter.setVideoCache(this.videoCache)
 
     await this.page.goto(PLATFORMS[config.platform].homeUrl)
-    // 等待页面加载并让 feed API 数据先到达缓存
     await sleep(2000)
-    log.info(`[TaskRunner ${this.taskId}] Page loaded, video cache size: ${this.videoCache.size}`)
+    log.info(`[TaskRunner ${this.taskId}] Page loaded`)
 
     // 自动点击首页第一个视频进入播放模式
     await this.autoEnterVideoMode(config.settings)
@@ -184,16 +179,13 @@ export class TaskRunner extends EventEmitter {
     this.platform = config.platform
     this.context = context
     this.page = await context.newPage()
-    this.setupVideoDataListener()
 
     this.adapter = createPlatformAdapter(config.platform)
     this.adapter.setPage(this.page)
-    this.adapter.setVideoCache(this.videoCache)
 
     await this.page.goto(PLATFORMS[config.platform].homeUrl)
-    // 等待页面加载并让 feed API 数据先到达缓存
     await sleep(2000)
-    log.info(`[TaskRunner ${this.taskId}] Page loaded, video cache size: ${this.videoCache.size}`)
+    log.info(`[TaskRunner ${this.taskId}] Page loaded`)
 
     // 自动点击首页第一个视频进入播放模式
     await this.autoEnterVideoMode(config.settings)
@@ -218,35 +210,6 @@ export class TaskRunner extends EventEmitter {
   }
 
   private page?: Page
-
-  private setupVideoDataListener(): void {
-    if (!this.page) return
-
-    const feedEndpoint = PLATFORM_CONFIGS[this.platform]?.apiEndpoints?.feed
-    const feedPathSegment = '/aweme/v1/web/' // 抖音 feed API 路径段
-
-    this.page.on('response', async (response: Response) => {
-      const url = response.url()
-      // 优先匹配配置的完整 URL，其次匹配路径段
-      const isFeed = feedEndpoint
-        ? url.includes(feedEndpoint) || url.includes(feedPathSegment)
-        : url.includes('/aweme/v1/web/tab/feed/') || url.includes(feedPathSegment)
-      if (isFeed) {
-        try {
-          const body = await response.json() as { aweme_list: any[] }
-          if (body?.aweme_list) {
-            const count = body.aweme_list.length
-            body.aweme_list.forEach((video) => {
-              this.videoCache.set(video.aweme_id, video)
-            })
-            log.info(`[TaskRunner ${this.taskId}] Feed API: cached ${count} videos, total cache: ${this.videoCache.size}`)
-          }
-        } catch (e) {
-          log.warn(`[TaskRunner ${this.taskId}] Feed API: failed to parse response`)
-        }
-      }
-    })
-  }
 
   /**
    * 暂停任务
@@ -346,6 +309,10 @@ export class TaskRunner extends EventEmitter {
     let operationCounts: Record<string, number> = {}
     this.consecutiveSkipCount = 0
 
+    let lastVideoId: string | null = null
+    let lastVideoFingerprint: string | null = null
+    let sameVideoRetryCount = 0
+
     for (let i = 0; completedCount < maxCount && !this._stopped; i++) {
       // 暂停检查
       while (this._paused && !this._stopped) {
@@ -362,11 +329,17 @@ export class TaskRunner extends EventEmitter {
       // 重置当前视频的AI结果
       this.currentVideoAIFilter = undefined
       this.currentVideoAIComment = undefined
-      this.preGeneratedComment = undefined
 
-      const videoSwitchWaitRange = settings.videoSwitchWaitRange || [5, 10]
-      const waitSeconds = random(videoSwitchWaitRange[0], videoSwitchWaitRange[1])
-      await sleep(waitSeconds * 1000)
+      // 第一个视频不需要切换等待（已经在 autoEnterVideoMode 中加载好了）
+      if (i > 0) {
+        const videoSwitchWaitRange = settings.videoSwitchWaitRange || [5, 10]
+        // 防御：若配置值不合理（如误填毫秒），限制最大等待 60 秒
+        const minWait = Math.min(videoSwitchWaitRange[0], 60)
+        const maxWait = Math.min(videoSwitchWaitRange[1], 60)
+        const waitSeconds = random(minWait, maxWait)
+        this.log('info', `等待 ${waitSeconds} 秒后获取视频信息...`)
+        await sleep(waitSeconds * 1000)
+      }
 
       const videoInfo = await this.getCurrentVideoInfo()
       if (!videoInfo) {
@@ -380,19 +353,33 @@ export class TaskRunner extends EventEmitter {
         continue
       }
 
-      if (this._operatedVideoIds.has(videoInfo.videoId)) {
-        this.log('info', `跳过(已操作过): @${videoInfo.author.nickname} [${videoInfo.videoId}]`)
-        this.consecutiveSkipCount++
-        if (this.consecutiveSkipCount >= maxConsecutiveSkips) {
-          this.log('error', `连续跳过 ${this.consecutiveSkipCount} 次，超过阈值 ${maxConsecutiveSkips}，任务暂停`)
-          break
+      // 检测视频是否真正切换了（同时用 videoId 和内容指纹）
+      const currentFingerprint = `${videoInfo.author.nickname}||${videoInfo.description}`
+      const isSameVideo = (videoInfo.videoId && videoInfo.videoId === lastVideoId)
+        || (currentFingerprint === lastVideoFingerprint && lastVideoFingerprint !== '||')
+      if (i > 0 && isSameVideo) {
+        sameVideoRetryCount++
+        this.log('warn', `视频未切换(${sameVideoRetryCount}次): ${videoInfo.videoId || videoInfo.author.nickname}`)
+        if (sameVideoRetryCount >= 3) {
+          this.log('warn', '连续3次视频未切换，尝试刷新页面后重试')
+          sameVideoRetryCount = 0
+          if (this.page) {
+            await this.page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => null)
+            await sleep(3000)
+            await this.page.waitForSelector('[data-e2e="feed-active-video"]', {
+              state: 'visible', timeout: 10000
+            }).catch(() => null)
+          }
         }
         await this.goToNextVideo()
         continue
       }
+      sameVideoRetryCount = 0
+      lastVideoId = videoInfo.videoId
+      lastVideoFingerprint = currentFingerprint
 
       // 检查视频类型（广告/直播/图集自动跳过）
-      const videoTypeCheck = this.checkVideoType(videoInfo, settings)
+      const videoTypeCheck = await this.checkVideoTypeAsync(videoInfo, settings)
       if (videoTypeCheck.shouldSkip) {
         this.log('info', `跳过${videoTypeCheck.reason}: @${videoInfo.author.nickname}`)
         await this.recordSkip(videoInfo, videoTypeCheck.reason)
@@ -447,30 +434,15 @@ export class TaskRunner extends EventEmitter {
         continue
       }
 
-      // 在观看等待之前预生成AI评论，利用等待时间并行完成
-      const commentOp = taskType === 'combo'
-        ? settings.operations.find(op => op.type === 'comment' && op.enabled)
-        : (taskType === 'comment' ? settings.operations.find(op => op.type === 'comment') : undefined)
-      let preGenPromise: Promise<void> | undefined
-      if (commentOp) {
-        preGenPromise = this.preGenerateComment(videoInfo, settings, commentOp)
-      } else {
-        this.preGeneratedComment = undefined
-      }
-
       if (settings.simulateWatchBeforeComment) {
         const skipWatch = await this.simulateWatch(videoInfo, settings)
         if (skipWatch) {
           this.log('info', `跳过(观看中断): @${videoInfo.author.nickname}`)
-          this.preGeneratedComment = undefined
           await this.recordSkip(videoInfo, '手动切换/长视频跳过')
           this.consecutiveSkipCount++
           continue
         }
       }
-
-      // 确保预生成评论已完成
-      if (preGenPromise) await preGenPromise
 
       const results = await this.executeOperations(videoInfo, settings, taskType, operationCounts)
       
@@ -530,159 +502,61 @@ export class TaskRunner extends EventEmitter {
     this.safeEmitStopped()
   }
 
-  private async getCurrentVideoInfo(maxRetries = 3): Promise<VideoInfo | null> {
+  private async getCurrentVideoInfo(maxRetries = 5): Promise<VideoInfo | null> {
     if (!this.adapter || !this.page) return null
 
+    // 先等待视频容器就绪
+    const containerFound = await this.page.waitForSelector('[data-e2e="feed-active-video"]', {
+      state: 'visible',
+      timeout: 8000
+    }).catch(() => null)
+
+    if (!containerFound) {
+      log.warn(`[TaskRunner ${this.taskId}] getCurrentVideoInfo: feed-active-video not found in DOM`)
+    }
+
     for (let attempt = 0; attempt < maxRetries; attempt++) {
-      const videoId = await this.adapter.getActiveVideoId()
-      if (!videoId) {
-        log.info(`[TaskRunner ${this.taskId}] getCurrentVideoInfo attempt ${attempt + 1}/${maxRetries}: videoId not found`)
-        if (attempt < maxRetries - 1) {
-          await sleep(1000)
-          continue
+      try {
+        const videoId = await this.adapter.getActiveVideoId()
+        if (!videoId) {
+          log.info(`[TaskRunner ${this.taskId}] getCurrentVideoInfo attempt ${attempt + 1}/${maxRetries}: videoId not found`)
+          if (attempt < maxRetries - 1) {
+            await sleep(1500)
+            continue
+          }
+          return null
         }
-        
-        return null
-      }
 
-      const videoData = this.videoCache.get(videoId)
-      if (!videoData) {
-        log.info(`[TaskRunner ${this.taskId}] getCurrentVideoInfo attempt ${attempt + 1}/${maxRetries}: videoId=${videoId}, not in cache (cache size: ${this.videoCache.size})`)
+        const videoInfo = await this.adapter.getVideoInfo(videoId)
+        if (videoInfo && (videoInfo.author.nickname || videoInfo.description)) return videoInfo
+
+        log.info(`[TaskRunner ${this.taskId}] getCurrentVideoInfo attempt ${attempt + 1}/${maxRetries}: DOM extraction incomplete, waiting...`)
         if (attempt < maxRetries - 1) {
-          await sleep(1000)
-          continue
+          await sleep(1500)
         }
-        // cache 未命中，尝试 adapter 的 getVideoInfo
-        const adapterInfo = await this.adapter.getVideoInfo(videoId)
-        if (adapterInfo) return adapterInfo
-
-        return null
+      } catch (e) {
+        log.warn(`[TaskRunner ${this.taskId}] getCurrentVideoInfo attempt ${attempt + 1}/${maxRetries} error: ${e}`)
+        if (attempt < maxRetries - 1) {
+          await sleep(1500)
+        }
       }
-
-      this.videoCache.delete(videoId)
-
-      const rawDuration = videoData.video?.duration || videoData.duration
-      let duration: number | undefined
-      if (rawDuration) {
-        duration = rawDuration > 1000 ? Math.floor(rawDuration / 1000) : rawDuration
-      }
-
-      if (!duration && this.page) {
-        try {
-          duration = await this.page.evaluate(() => {
-            const el = document.querySelector('[data-e2e="feed-active-video"] .time-duration')
-            if (!el) return undefined
-            const parts = (el.textContent?.trim() || '').split(':').map(p => parseInt(p, 10))
-            if (parts.length === 2) return parts[0] * 60 + parts[1]
-            if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2]
-            return undefined
-          }) || undefined
-        } catch { /* ignore */ }
-      }
-
-      return {
-        videoId: videoData.aweme_id,
-        title: videoData.desc,
-        description: videoData.desc,
-        author: {
-          userId: videoData.author?.uid || '',
-          nickname: videoData.author?.nickname || '',
-          verified: false
-        },
-        tags: videoData.video_tag?.map((t: any) => t.tag_name) || [],
-        likeCount: videoData.statistics?.digg_count || 0,
-        collectCount: videoData.statistics?.collect_count || 0,
-        shareCount: videoData.statistics?.share_count || 0,
-        commentCount: videoData.statistics?.comment_count || 0,
-        shareUrl: videoData.share_url || '',
-        createTime: Date.now(),
-        duration,
-        _raw: videoData
-      } as VideoInfo & { _raw: any }
     }
 
     return null
   }
 
   /**
-   * DOM 降级提取视频信息 — 当 API cache 未命中时从页面 DOM 提取基础信息
+   * 检查视频类型，判断是否需要跳过广告/直播/图集（从DOM检测）
    */
-  private async getVideoInfoFromDOM(): Promise<VideoInfo | null> {
-    if (!this.page) return null
-    try {
-      const info = await this.page.evaluate(() => {
-        const activeVideo = document.querySelector('[data-e2e="feed-active-video"]')
-        if (!activeVideo) return null
-
-        // 提取作者昵称
-        const nicknameEl = activeVideo.querySelector('[data-e2e="video-nickname"]') ||
-          activeVideo.querySelector('.account-name') ||
-          activeVideo.querySelector('.author-card-user-name')
-        const nickname = nicknameEl?.textContent?.trim() || ''
-
-        // 提取视频描述
-        const descEl = activeVideo.querySelector('[data-e2e="video-desc"]') ||
-          activeVideo.querySelector('.video-desc') ||
-          activeVideo.querySelector('.desc')
-        const description = descEl?.textContent?.trim() || ''
-
-        // 提取 videoId
-        const vid = activeVideo.getAttribute('data-e2e-vid') || ''
-
-        if (!vid && !nickname && !description) return null
-
-        return {
-          videoId: vid || `dom-${Date.now()}`,
-          title: description,
-          description,
-          author: {
-            userId: '',
-            nickname,
-            verified: false
-          },
-          tags: [] as string[],
-          likeCount: 0,
-          collectCount: 0,
-          shareCount: 0,
-          commentCount: 0,
-          shareUrl: '',
-          createTime: Date.now()
-        }
-      })
-      if (info) {
-        log.info(`[TaskRunner ${this.taskId}] DOM fallback: extracted info for @${info.author.nickname}`)
-      }
-      return info as VideoInfo | null
-    } catch (e) {
-      log.warn(`[TaskRunner ${this.taskId}] DOM fallback failed: ${e}`)
-      return null
-    }
-  }
-
-  /**
-   * 检查视频类型，判断是否需要跳过广告/直播/图集
-   */
-  private checkVideoType(videoInfo: VideoInfo, settings: FeedAcSettingsV3): { shouldSkip: boolean; reason: string } {
-    const raw = (videoInfo as any)._raw
-    if (!raw) return { shouldSkip: false, reason: '' }
-
+  private async checkVideoTypeAsync(videoInfo: VideoInfo, settings: FeedAcSettingsV3): Promise<{ shouldSkip: boolean; reason: string }> {
     if (this.adapter instanceof DouyinPlatformAdapter) {
-      const isAd = raw.is_ads === true
-      const isLive = raw.live_info && raw.live_info.room_id
-      const awemeType = raw.aweme_type || 0
+      const { isAd, isLive } = await this.adapter.isAdOrLiveFromDOM()
 
-      if (settings.skipAdVideo && (isAd || (awemeType !== 0 && awemeType !== 2))) {
-        if (isAd || awemeType === 1) {
-          return { shouldSkip: true, reason: '广告视频' }
-        }
+      if (settings.skipAdVideo && isAd) {
+        return { shouldSkip: true, reason: '广告视频' }
       }
-
-      if (settings.skipLiveVideo && (isLive || awemeType === 5)) {
+      if (settings.skipLiveVideo && isLive) {
         return { shouldSkip: true, reason: '直播视频' }
-      }
-
-      if (settings.skipImageSet && awemeType === 2) {
-        return { shouldSkip: true, reason: '图集' }
       }
     }
 
@@ -824,6 +698,8 @@ export class TaskRunner extends EventEmitter {
     return currentId !== null && currentId !== originalVideoId
   }
 
+  private currentPlaybackRate = 1.0
+
   private async simulateWatch(
     videoInfo: VideoInfo,
     settings: FeedAcSettingsV3
@@ -833,8 +709,6 @@ export class TaskRunner extends EventEmitter {
     const longVideoAction = settings.longVideoAction || 'skip'
     const isLongVideo = duration > 0 && duration > threshold
 
-    let playbackRate = 1.0
-
     if (isLongVideo) {
       this.log('info', `长视频检测: ${duration}秒 (阈值: ${threshold}秒)`)
       if (longVideoAction === 'skip') {
@@ -842,29 +716,39 @@ export class TaskRunner extends EventEmitter {
         return true
       }
       if (longVideoAction === 'speed' && this.adapter) {
-        playbackRate = settings.longVideoSpeed || 2.0
-        this.log('info', `长视频策略: 倍速播放 ${playbackRate}x`)
-        if ('setPlaybackRate' in this.adapter) {
-          await (this.adapter as any).setPlaybackRate(playbackRate)
+        const targetRate = settings.longVideoSpeed || 2.0
+        if (this.currentPlaybackRate !== targetRate) {
+          this.log('info', `长视频策略: 倍速播放 ${targetRate}x`)
+          if ('setPlaybackRate' in this.adapter) {
+            await (this.adapter as any).setPlaybackRate(targetRate)
+            this.currentPlaybackRate = targetRate
+          }
+        } else {
+          this.log('info', `长视频: 已在 ${targetRate}x 倍速`)
         }
+      }
+    } else if (this.currentPlaybackRate !== 1.0 && this.adapter) {
+      this.log('info', `非长视频，恢复 1x 倍速`)
+      if ('setPlaybackRate' in this.adapter) {
+        await (this.adapter as any).setPlaybackRate(1.0)
+        this.currentPlaybackRate = 1.0
       }
     }
 
     let watchTimeMs = this.calculateWatchTime(videoInfo, settings)
-    // 倍速播放时，实际等待时间需要除以播放速率
-    if (playbackRate > 1) {
+    if (this.currentPlaybackRate > 1) {
       const original = watchTimeMs
-      watchTimeMs = Math.max(Math.floor(watchTimeMs / playbackRate), 1000)
-      this.log('info', `倍速 ${playbackRate}x: 计划观看 ${(original / 1000).toFixed(1)}秒 → 实际等待 ${(watchTimeMs / 1000).toFixed(1)}秒`)
+      watchTimeMs = Math.max(Math.floor(watchTimeMs / this.currentPlaybackRate), 1000)
+      this.log('info', `倍速 ${this.currentPlaybackRate}x: 计划观看 ${(original / 1000).toFixed(1)}秒 → 实际等待 ${(watchTimeMs / 1000).toFixed(1)}秒`)
     }
     const progress = this.adapter && 'getPlaybackProgress' in this.adapter
       ? await (this.adapter as any).getPlaybackProgress()
       : null
 
     if (progress && progress.current > 0) {
-      const alreadyWatchedWallMs = progress.current * 1000 / playbackRate
+      const alreadyWatchedWallMs = progress.current * 1000 / this.currentPlaybackRate
       const adjustedMs = Math.max(watchTimeMs - alreadyWatchedWallMs, 1000)
-      this.log('info', `当前播放进度: ${this.formatTime(progress.current)}/${this.formatTime(progress.total)} (${playbackRate}x), 计划等待 ${(watchTimeMs / 1000).toFixed(1)}秒, 扣除已播放后实际等待 ${(adjustedMs / 1000).toFixed(1)}秒`)
+      this.log('info', `当前播放进度: ${this.formatTime(progress.current)}/${this.formatTime(progress.total)} (${this.currentPlaybackRate}x), 计划等待 ${(watchTimeMs / 1000).toFixed(1)}秒, 扣除已播放后实际等待 ${(adjustedMs / 1000).toFixed(1)}秒`)
       watchTimeMs = adjustedMs
     } else {
       this.log('info', `模拟观看 ${(watchTimeMs / 1000).toFixed(1)}秒`)
@@ -880,18 +764,11 @@ export class TaskRunner extends EventEmitter {
 
       if (await this.hasVideoChanged(videoInfo.videoId)) {
         this.log('info', '检测到视频已切换，中止当前操作')
-        if (playbackRate > 1 && this.adapter && 'setPlaybackRate' in this.adapter) {
-          await (this.adapter as any).setPlaybackRate(1.0)
-        }
         return true
       }
 
       await sleep(checkInterval)
       elapsed += checkInterval
-    }
-
-    if (playbackRate > 1 && this.adapter && 'setPlaybackRate' in this.adapter) {
-      await (this.adapter as any).setPlaybackRate(1.0)
     }
 
     return false
@@ -1124,54 +1001,6 @@ export class TaskRunner extends EventEmitter {
     }
   }
 
-  private async preGenerateComment(
-    videoInfo: VideoInfo,
-    settings: FeedAcSettingsV3,
-    operation: FeedAcSettingsV3['operations'][0]
-  ): Promise<void> {
-    const useAI = (operation.aiEnabled || settings.aiCommentEnabled) && this.aiService
-    if (!useAI) {
-      this.preGeneratedComment = null
-      return
-    }
-
-    try {
-      let topComments: Array<{ content: string; likeCount: number }> = []
-      if (this.adapter instanceof DouyinPlatformAdapter) {
-        const refCount = settings.commentReferenceCount || 5
-        this.log('info', `[预生成] 获取热门评论(${refCount}条)作为AI参考...`)
-        topComments = await this.adapter.getTopComments(videoInfo.videoId, refCount)
-        if (topComments.length > 0) {
-          this.log('info', `[预生成] 获取到 ${topComments.length} 条热门评论`)
-        }
-      }
-
-      const videoContext = {
-        author: videoInfo.author.nickname,
-        videoDesc: videoInfo.description,
-        videoTags: videoInfo.tags,
-        topComments
-      }
-      const commentOptions = {
-        style: settings.commentStyle || 'mixed',
-        maxLength: settings.commentMaxLength || 50,
-        customPrompt: operation.aiPrompt,
-        systemPrompt: settings.commentSystemPrompt
-      }
-
-      const result = await this.aiService!.generateComment(videoContext, commentOptions)
-      this.preGeneratedComment = {
-        text: result.content,
-        topComments,
-        prompt: operation.aiPrompt || settings.commentSystemPrompt
-      }
-      this.log('info', `[预生成] AI评论已就绪: ${result.content}`)
-    } catch {
-      this.log('warn', '[预生成] AI评论生成失败，将在评论时使用备选')
-      this.preGeneratedComment = null
-    }
-  }
-
   private async executeComment(
     videoInfo: VideoInfo,
     settings: FeedAcSettingsV3,
@@ -1198,16 +1027,7 @@ export class TaskRunner extends EventEmitter {
     let commentText = ''
     const useAI = (operation.aiEnabled || settings.aiCommentEnabled) && this.aiService
 
-    if (useAI && this.preGeneratedComment) {
-      commentText = this.preGeneratedComment.text
-      this.log('info', `使用预生成AI评论: ${commentText}`)
-      this.currentVideoAIComment = {
-        comment: commentText,
-        topComments: this.preGeneratedComment.topComments,
-        prompt: this.preGeneratedComment.prompt
-      }
-      this.preGeneratedComment = undefined
-    } else if (useAI) {
+    if (useAI) {
       try {
         let topComments: Array<{ content: string; likeCount: number }> = []
         if (this.adapter instanceof DouyinPlatformAdapter) {

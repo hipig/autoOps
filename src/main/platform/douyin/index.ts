@@ -13,35 +13,6 @@ import { sleep, random, generateId } from '../../utils/common'
 import { store, StorageKey } from '../../utils/storage'
 import log from 'electron-log/main'
 
-interface DouyinFeedItem {
-  aweme_id: string
-  aweme_type: number // 0=普通视频, 1=广告, 2=图集, 5=直播等
-  desc: string
-  is_ads?: boolean // 是否广告
-  live_info?: {
-    // 直播信息
-    room_id: string
-    status: number
-  }
-  author: {
-    nickname: string
-    uid: string
-  }
-  video_tag: Array<{ tag_name: string }>
-  share_url: string
-  channel_info?: {
-    channel_name: string
-    channel_id: string
-  }
-  statistics?: {
-    // 互动数据
-    digg_count: number // 点赞
-    comment_count: number // 评论
-    collect_count: number // 收藏
-    share_count: number // 分享
-  }
-}
-
 interface DouyinCommentResponse {
   status_code: number
   comments: Array<{
@@ -63,7 +34,6 @@ export class DouyinPlatformAdapter extends BasePlatformAdapter {
 
   private browser?: Browser
   private context?: BrowserContext
-  protected videoCache = new Map<string, DouyinFeedItem>()
   private currentVideoStartTime = 0
 
   constructor() {
@@ -134,7 +104,6 @@ export class DouyinPlatformAdapter extends BasePlatformAdapter {
     })
     this.page = await this.context.newPage()
     this.setPage(this.page)
-    await this.setupVideoDataListener()
 
     // 检查登录状态
     await this.checkLoginStatus()
@@ -197,51 +166,27 @@ export class DouyinPlatformAdapter extends BasePlatformAdapter {
     }
   }
 
-  private async setupVideoDataListener(): Promise<void> {
-    if (!this.page) return
-
-    this.page.on('response', async (response: Response) => {
-      const url = response.url()
-      // 匹配多种可能的 feed API URL 模式
-      if (url.includes('/aweme/v1/web/')) {
-        try {
-          const body = await response.json() as { aweme_list: DouyinFeedItem[] }
-          if (body?.aweme_list) {
-            const count = body.aweme_list.length
-            body.aweme_list.forEach((video) => {
-              this.videoCache.set(video.aweme_id, video)
-            })
-            log.info(`[DouyinAdapter] Feed API: cached ${count} videos, total cache: ${this.videoCache.size}`)
-          }
-        } catch {
-        }
-      }
-    })
-  }
-
   /**
-   * 判断是否为广告或直播视频
+   * 判断是否为广告或直播视频（从DOM检测）
    */
-  isAdOrLive(feedItem: DouyinFeedItem): boolean {
-    if (feedItem.aweme_type !== 0) return true
-    if (feedItem.is_ads === true) return true
-    if (feedItem.live_info && feedItem.live_info.room_id) return true
-    return false
-  }
+  async isAdOrLiveFromDOM(): Promise<{ isAd: boolean; isLive: boolean }> {
+    if (!this.page) return { isAd: false, isLive: false }
+    try {
+      return await this.page.evaluate(() => {
+        const activeVideo = document.querySelector('[data-e2e="feed-active-video"]')
+        if (!activeVideo) return { isAd: false, isLive: false }
 
-  /**
-   * 获取视频类型描述
-   */
-  getVideoTypeDesc(feedItem: DouyinFeedItem): string {
-    if (feedItem.is_ads === true) return '广告'
-    if (feedItem.live_info && feedItem.live_info.room_id) return '直播'
-    switch (feedItem.aweme_type) {
-      case 0: return '普通视频'
-      case 2: return '图集'
-      case 5: return '直播'
-      default:
-        if (feedItem.aweme_type !== 0) return `其他类型(${feedItem.aweme_type})`
-        return '普通视频'
+        const isAd = !!activeVideo.querySelector('[data-e2e="video-ad"], [class*="ad-tag"], [class*="广告"]')
+
+        // 直播检测：查找明确的直播标记，排除播放器自身的 class（如 xgplayer-live）
+        const liveBadge = activeVideo.querySelector('[data-e2e="live-badge"]')
+        const liveTag = activeVideo.querySelector('.live-tag, .living-tag, [class*="living"], [class*="直播"]')
+        const isLive = !!(liveBadge || liveTag)
+
+        return { isAd, isLive }
+      })
+    } catch {
+      return { isAd: false, isLive: false }
     }
   }
 
@@ -307,59 +252,21 @@ export class DouyinPlatformAdapter extends BasePlatformAdapter {
   }
 
   async getVideoInfo(videoId: string): Promise<VideoInfo | null> {
-    const feedItem = this.videoCache.get(videoId)
-    if (feedItem) {
-      // 从 DOM 获取时长信息
-      let duration: number | undefined
-      if (this.page) {
-        try {
-          duration = await this.page.evaluate(() => {
-            const durationEl = document.querySelector('[data-e2e="feed-active-video"] .time-duration')
-            if (!durationEl) return undefined
-            const durationText = durationEl.textContent?.trim() || ''
-            const parts = durationText.split(':').map(p => parseInt(p, 10))
-            if (parts.length === 2) {
-              return parts[0] * 60 + parts[1]
-            } else if (parts.length === 3) {
-              return parts[0] * 3600 + parts[1] * 60 + parts[2]
-            }
-            return undefined
-          })
-        } catch {
-          duration = undefined
-        }
-      }
-
-      return {
-        videoId: feedItem.aweme_id,
-        title: feedItem.desc,
-        description: feedItem.desc,
-        author: {
-          userId: feedItem.author.uid,
-          nickname: feedItem.author.nickname,
-          verified: false
-        },
-        tags: feedItem.video_tag.map(t => t.tag_name),
-        likeCount: feedItem.statistics?.digg_count || 0,
-        collectCount: feedItem.statistics?.collect_count || 0,
-        shareCount: feedItem.statistics?.share_count || 0,
-        commentCount: feedItem.statistics?.comment_count || 0,
-        shareUrl: feedItem.share_url,
-        createTime: Date.now(),
-        duration
-      }
-    }
-
-    // 降级：从 DOM 提取基础信息
     return this.getVideoInfoFromDOM(videoId)
   }
 
   /**
-   * 从页面 DOM 提取视频信息（API cache 未命中时的降级方案）
+   * 从页面 DOM 提取视频信息
    */
   private async getVideoInfoFromDOM(videoId: string): Promise<VideoInfo | null> {
     if (!this.page) return null
     try {
+      // 等待视频描述区域出现（确保 DOM 已渲染）
+      await this.page.waitForSelector(
+        '[data-e2e="feed-active-video"] [data-e2e="video-desc"], [data-e2e="feed-active-video"] [data-e2e="video-nickname"]',
+        { state: 'visible', timeout: 5000 }
+      ).catch(() => null)
+
       const info = await this.page.evaluate((vid: string) => {
         const activeVideo = document.querySelector('[data-e2e="feed-active-video"]')
         if (!activeVideo) return null
@@ -375,6 +282,20 @@ export class DouyinPlatformAdapter extends BasePlatformAdapter {
           activeVideo.querySelector('.video-desc') ||
           activeVideo.querySelector('.desc')
         const description = descEl?.textContent?.trim() || ''
+
+        // 从描述中提取话题标签 (#xxx)
+        const tags: string[] = []
+        const tagEls = activeVideo.querySelectorAll('[data-e2e="video-desc"] a[href*="hashtag"], [data-e2e="video-desc"] .hashtag')
+        tagEls.forEach(el => {
+          const tag = el.textContent?.trim().replace(/^#/, '') || ''
+          if (tag) tags.push(tag)
+        })
+        if (tags.length === 0 && description) {
+          const hashMatches = description.match(/#([^\s#]+)/g)
+          if (hashMatches) {
+            hashMatches.forEach(m => tags.push(m.replace(/^#/, '')))
+          }
+        }
 
         // 提取视频时长
         const durationEl = activeVideo.querySelector('.time-duration')
@@ -400,7 +321,7 @@ export class DouyinPlatformAdapter extends BasePlatformAdapter {
             nickname,
             verified: false
           },
-          tags: [] as string[],
+          tags,
           likeCount: 0,
           collectCount: 0,
           shareCount: 0,
@@ -411,11 +332,11 @@ export class DouyinPlatformAdapter extends BasePlatformAdapter {
         }
       }, videoId)
       if (info) {
-        log.info(`[DouyinAdapter] DOM fallback: extracted info for @${info.author.nickname}`)
+        log.info(`[DouyinAdapter] DOM: extracted info for @${info.author.nickname}, tags: [${info.tags.join(', ')}]`)
       }
       return info as VideoInfo | null
     } catch (e) {
-      log.warn(`[DouyinAdapter] DOM fallback failed: ${e}`)
+      log.warn(`[DouyinAdapter] DOM extraction failed: ${e}`)
       return null
     }
   }
@@ -620,44 +541,54 @@ export class DouyinPlatformAdapter extends BasePlatformAdapter {
     }
 
     const prevVideoId = await this.getActiveVideoId()
+    const prevFingerprint = await this.getVideoFingerprint()
     this.lastVideoId = prevVideoId
 
-    await this.page.keyboard.press(this.config.keyboardShortcuts.nextVideo)
-    await this.page.waitForSelector(this.config.selectors.activeVideo, {
-      state: 'visible',
-      timeout: 5000
-    }).catch(() => null)
+    const maxAttempts = 3
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      await this.page.keyboard.press(this.config.keyboardShortcuts.nextVideo)
+      await sleep(1500)
 
-    await this.waitForVideoIdChange(prevVideoId)
-
-    if (waitForData) {
-      await this.waitForVideoCacheData()
+      const changed = await this.waitForVideoChange(prevVideoId, prevFingerprint)
+      if (changed) {
+        log.info(`[DouyinAdapter] goToNextVideo: switched (attempt ${attempt + 1})`)
+        return
+      }
+      log.warn(`[DouyinAdapter] goToNextVideo: video not switched (attempt ${attempt + 1}/${maxAttempts})`)
+      // 点击视频区域确保焦点在播放器上，再重试
+      await this.page.click('[data-e2e="feed-active-video"]', { position: { x: 300, y: 300 } }).catch(() => null)
+      await sleep(500)
     }
+    log.warn(`[DouyinAdapter] goToNextVideo: failed to switch after ${maxAttempts} attempts`)
   }
 
-  private async waitForVideoIdChange(prevVideoId: string | null, maxWaitMs: number = 5000): Promise<void> {
-    if (!this.page) return
+  private async getVideoFingerprint(): Promise<string> {
+    if (!this.page) return ''
+    return this.page.evaluate(() => {
+      const el = document.querySelector('[data-e2e="feed-active-video"]')
+      if (!el) return ''
+      const nick = el.querySelector('[data-e2e="video-nickname"]')?.textContent?.trim() || ''
+      const desc = el.querySelector('[data-e2e="video-desc"]')?.textContent?.trim() || ''
+      return `${nick}||${desc}`
+    }).catch(() => '')
+  }
+
+  private async waitForVideoChange(prevVideoId: string | null, prevFingerprint: string, maxWaitMs: number = 5000): Promise<boolean> {
+    if (!this.page) return false
     const startTime = Date.now()
     while (Date.now() - startTime < maxWaitMs) {
       const newVideoId = await this.getActiveVideoId()
       if (newVideoId && newVideoId !== prevVideoId) {
-        return
+        return true
+      }
+      // 即使 videoId 没变或拿不到，也通过内容指纹检测变化
+      const newFingerprint = await this.getVideoFingerprint()
+      if (prevFingerprint && newFingerprint && newFingerprint !== prevFingerprint) {
+        return true
       }
       await sleep(300)
     }
-  }
-
-  private async waitForVideoCacheData(maxWaitMs: number = 3000): Promise<void> {
-    const currentVideoId = await this.getActiveVideoId()
-    if (!currentVideoId) return
-
-    if (this.videoCache.has(currentVideoId)) return
-
-    const startTime = Date.now()
-    while (Date.now() - startTime < maxWaitMs) {
-      if (this.videoCache.has(currentVideoId)) return
-      await sleep(300)
-    }
+    return false
   }
 
   async openCommentSection(): Promise<void> {
@@ -698,26 +629,19 @@ export class DouyinPlatformAdapter extends BasePlatformAdapter {
 
   async getActiveVideoId(): Promise<string | null> {
     if (!this.page) return null
-    const element = await this.page.$(this.config.selectors.activeVideo)
-    if (!element) return null
-    const videoId = await element.getAttribute(this.config.selectors.videoIdAttr)
-    return videoId
-  }
+    return this.page.evaluate(() => {
+      // 优先从 URL 提取 modal_id（精选页切换视频时 URL 会实时更新）
+      const url = window.location.href
+      const modalMatch = url.match(/modal_id=(\d+)/)
+      if (modalMatch) return modalMatch[1]
 
-  async getCurrentFeedItem(): Promise<DouyinFeedItem | null> {
-    const videoId = await this.getActiveVideoId()
-    if (!videoId) return null
-    const feedItem = this.videoCache.get(videoId)
-    this.videoCache.delete(videoId)
-    return feedItem || null
-  }
-
-  setVideoCache(cache: Map<string, DouyinFeedItem>): void {
-    this.videoCache = cache
-  }
-
-  getVideoCache(): Map<string, DouyinFeedItem> {
-    return this.videoCache
+      // 从 active video 元素的属性获取
+      const el = document.querySelector('[data-e2e="feed-active-video"]')
+      if (!el) return null
+      return el.getAttribute('data-e2e-vid')
+        || el.getAttribute('data-aweme-id')
+        || null
+    })
   }
 
   setCurrentVideoStartTime(time: number): void {
@@ -778,15 +702,19 @@ export class DouyinPlatformAdapter extends BasePlatformAdapter {
       if (!settingBtn) return false
 
       await settingBtn.hover()
-      await this.page.waitForTimeout(500)
+      // 等待倍速面板展开（slide-show 样式出现）
+      await this.page.waitForSelector('.xgplayer-playback-setting.slide-show', {
+        state: 'visible',
+        timeout: 3000
+      }).catch(() => null)
 
       const selector = `.xgplayer-playratio-item[data-id="${closest}"]`
       const rateBtn = await this.page.waitForSelector(selector, { state: 'visible', timeout: 3000 }).catch(() => null)
       if (rateBtn) {
         await rateBtn.click()
-        await this.page.waitForTimeout(200)
-        // 移开鼠标，收起悬浮面板
+        await this.page.waitForTimeout(300)
         await this.page.mouse.move(0, 0)
+        log.info(`[DouyinAdapter] setPlaybackRate: ${closest}x`)
         return true
       }
 
